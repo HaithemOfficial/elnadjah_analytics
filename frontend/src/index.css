@@ -14,3 +14,12 @@ body {
 * {
   @apply selection:bg-indigo-500/40 selection:text-white;
 }
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

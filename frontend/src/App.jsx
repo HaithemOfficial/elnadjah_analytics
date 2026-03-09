@@ -209,6 +209,7 @@ const getLeadDate = (lead, dateField) => {
 };
 
 const getContactDate = (lead) => lead.firstContact || null;
+const hasAssignedAgent = (lead) => Boolean(String(lead?.counselor || "").trim());
 
 function inRange(date, startDate, endDate) {
   if (!date) return false;
@@ -300,7 +301,7 @@ function leadsOverTimePerformance(leads, dateField, granularity, startDate, endD
     if (leadDate && inRange(leadDate, startDate, endDate)) {
       const key = granularity === "month" ? monthKey(leadDate) : dayKey(leadDate);
       totals[key] = (totals[key] || 0) + 1;
-      if (lead.counselor) {
+      if (hasAssignedAgent(lead)) {
         contacted[key] = (contacted[key] || 0) + 1;
       }
     }
@@ -444,7 +445,7 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
   const previous = new Map();
 
   leads.forEach((lead) => {
-    if (!lead.counselor) return;
+    if (!hasAssignedAgent(lead)) return;
     const leadDate = getLeadDate(lead, dateField);
     if (!leadDate) return;
     if (!inRange(leadDate, startDate, endDate)) return;
@@ -472,7 +473,7 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
 
   if (previousStart && previousEnd) {
     leads.forEach((lead) => {
-      if (!lead.counselor) return;
+      if (!hasAssignedAgent(lead)) return;
       const leadDate = getLeadDate(lead, dateField);
       if (!inRange(leadDate, previousStart, previousEnd)) return;
 
@@ -554,7 +555,7 @@ function buildStatsFromLeads(leads, filters) {
   const bySource = groupCount(filtered, "source");
   const byFinanceState = groupCount(filtered, "bac");
 
-  const contactedCount = filtered.filter((lead) => lead.counselor).length;
+  const contactedCount = filtered.filter(hasAssignedAgent).length;
   const responseRate = filtered.length ? Math.trunc((contactedCount / filtered.length) * 100) : 0;
 
   let speedTotal = 0;
@@ -604,7 +605,7 @@ function buildStatsFromLeads(leads, filters) {
     byFinanceState,
     byCounselorDetails: buildDetails(filtered, "counselor", "Not assigned yet"),
     byDestinationDetails: buildDetails(filtered, "destination", "Unknown"),
-    agentLeaderboard: buildAgentLeaderboard(leads, startDate, endDate, dateField),
+    agentLeaderboard: buildAgentLeaderboard(filtered, startDate, endDate, dateField),
     allAgents: uniqueAgents(leads),
     timeGranularity: granularity,
     leadsOverTime: leadsSeries,
@@ -618,7 +619,7 @@ function buildStatsFromLeads(leads, filters) {
       "source"
     ),
     leadsOverTimeByCounselor: leadsOverTimeByDimension(
-      filtered.filter((lead) => lead.counselor),
+      filtered.filter(hasAssignedAgent),
       dateField,
       granularity,
       "counselor"
@@ -1012,12 +1013,6 @@ export default function App() {
   const inactiveAgents = allAgents.filter(
     (name) => name && !activeAgentNames.includes(name)
   );
-  const decliningAgents = agentLeaderboard.filter(
-    (row) =>
-      row.name !== "Not assigned yet" &&
-      ((row.contactedChangePct ?? 0) < 0 || (row.interestedChangePct ?? 0) < 0)
-  );
-
   const leaderboardRows = useMemo(() => {
     const rows = agentLeaderboard
       .filter((row) => row.name !== "Not assigned yet")
@@ -1063,7 +1058,11 @@ export default function App() {
     });
   }, [stats]);
   const notContactedCount = stats?.totals?.notContacted ?? 0;
-  const assignedCount = Math.max(totalLeads - notContactedCount, 0);
+  const assignedCount =
+    stats?.byCounselor?.reduce(
+      (sum, item) => (item.name === "Not assigned yet" ? sum : sum + (item.value || 0)),
+      0
+    ) ?? 0;
   const topAgentShare = topAgent?.value
     ? `${rateOf(topAgent.value)}%`
     : "0.0%";
@@ -1111,33 +1110,30 @@ export default function App() {
   const teamInterestedRate = totalTeamContacted
     ? ((totalTeamInterested / totalTeamContacted) * 100).toFixed(1)
     : "0.0";
-  const topTeamAgent = leaderboardRows[0] || null;
-  const topTeamShare = topTeamAgent && totalTeamContacted
-    ? ((topTeamAgent.contacted / totalTeamContacted) * 100).toFixed(1)
-    : "0.0";
   const avgTeamResponseDaysRaw = leaderboardRows
     .filter((row) => row.avgResponseDays !== null && row.avgResponseDays !== undefined)
     .reduce((sum, row, _, arr) => sum + row.avgResponseDays / arr.length, 0);
   const avgTeamResponseDays = Number.isFinite(avgTeamResponseDaysRaw)
     ? avgTeamResponseDaysRaw.toFixed(1)
     : "0.0";
-  const avgTeamFollowUpDaysRaw = leaderboardRows
-    .filter((row) => row.followUpSpeedDays !== null && row.followUpSpeedDays !== undefined)
-    .reduce((sum, row, _, arr) => sum + row.followUpSpeedDays / arr.length, 0);
-  const avgTeamFollowUpDays = Number.isFinite(avgTeamFollowUpDaysRaw)
-    ? avgTeamFollowUpDaysRaw.toFixed(1)
-    : "0.0";
   const teamCapacityUtilization = totalLeads
     ? ((assignedCount / totalLeads) * 100).toFixed(1)
-    : "0.0";
-  const teamPipelineRisk = totalLeads
-    ? ((notContactedCount / totalLeads) * 100).toFixed(1)
     : "0.0";
   const teamPerformanceData = leaderboardRows.slice(0, 8).map((row) => ({
     name: row.name,
     contacted: row.contacted,
     interested: row.interested,
   }));
+  const teamInterestedRateData = leaderboardRows.slice(0, 8).map((row) => ({
+    name: row.name,
+    interestedRate: row.interestedRate || 0,
+  }));
+  const teamAvgContactedPerDayData = leaderboardRows
+    .slice(0, 8)
+    .map((row) => ({
+      name: row.name,
+      avgContactedPerDay: Number(row.avgContactedPerDay) || 0,
+    }));
   const teamCoverageData = [
     { name: "Contacted", value: assignedCount },
     { name: "Not contacted", value: notContactedCount },
@@ -1301,12 +1297,11 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
         {/* Move tab navigation above filter section */}
-        <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-slate-950 p-1 border border-slate-800 mb-8 mt-2">
-          <div className="flex items-center justify-start gap-2 w-full py-2">
+        <div className="relative rounded-2xl border border-slate-800 bg-slate-950 p-1 mb-8 mt-2">
+          <div className="no-scrollbar flex w-full items-center gap-2 overflow-x-auto py-2 px-1 sm:px-2 md:flex-wrap md:overflow-visible">
             {[ 
               { key: "general", label: "General KPIs" },
               { key: "leadGeneration", label: "Lead Generation KPIs" },
-              { key: "conversion", label: "Conversion KPIs" },
               { key: "team", label: "Team Performance KPIs" },
               { key: "destinations", label: "Destinations KPIs" },
             ].map((group) => (
@@ -1314,17 +1309,18 @@ export default function App() {
                 key={group.key}
                 type="button"
                 onClick={() => setActiveOverviewGroup(group.key)}
-                className={`px-4 py-1.5 text-xs font-semibold rounded-full transition shadow-sm focus:outline-none border-2 ${
+                className={`shrink-0 whitespace-nowrap rounded-full border-2 px-3 py-2 text-[11px] font-semibold tracking-[0.01em] transition shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 sm:px-4 sm:text-xs ${
                   activeOverviewGroup === group.key
-                    ? "bg-indigo-500 text-white border-indigo-500"
-                    : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-white"
+                    ? "bg-indigo-500 text-white border-indigo-400 shadow-indigo-900/40"
+                    : "bg-slate-900 text-slate-200 border-slate-700 hover:bg-slate-800 hover:text-white"
                 }`}
-                style={{ minWidth: 90 }}
+                style={{ minWidth: 84 }}
               >
                 {group.label}
               </button>
             ))}
           </div>
+          <div className="pointer-events-none absolute inset-y-1 right-1 w-8 rounded-r-xl bg-gradient-to-l from-slate-950/70 via-slate-950/40 to-transparent md:hidden" />
         </div>
 
         <section className="sticky top-2 z-20 rounded-2xl border border-slate-900 bg-slate-900/80 p-4 shadow-[0_20px_60px_-45px_rgba(15,23,42,0.8)] backdrop-blur mb-8">
@@ -2070,104 +2066,6 @@ export default function App() {
               </section>
             )}
 
-            {activeOverviewGroup === "conversion" && (
-              <section className="space-y-6">
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                  <StatCard
-                    title="Total interested"
-                    value={formatNumber(totalInterested)}
-                    helper={interestedComparisonHelper}
-                    helperTone={
-                      Number(stats?.comparison?.interested?.pctChange) >= 0
-                        ? "positive"
-                        : "negative"
-                    }
-                  />
-                  <StatCard
-                    title="Lead to interested rate"
-                    value={`${leadToInterestedRate}%`}
-                    helper={`${formatNumber(totalInterested)} interested out of ${formatNumber(totalLeads)} leads`}
-                    helperTone={Number(leadToInterestedRate) >= 20 ? "positive" : "negative"}
-                  />
-                  <StatCard
-                    title="Contact to interested rate"
-                    value={`${contactedToInterestedRate}%`}
-                    helper={`${formatNumber(totalInterested)} interested from ${formatNumber(assignedCount)} contacted`}
-                    helperTone={Number(contactedToInterestedRate) >= 30 ? "positive" : "negative"}
-                  />
-                  <StatCard
-                    title="Conversion leakage"
-                    value={`${conversionLeakRate}%`}
-                    helper={`${formatNumber(conversionLeakCount)} not interested or unclear`}
-                    helperTone={Number(conversionLeakRate) <= 25 ? "positive" : "negative"}
-                  />
-                </div>
-
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  <MiniStat
-                    title="Nurture pipeline"
-                    value={`${nurturePipelineRate}%`}
-                    subtitle={`${formatNumber(nurturePipelineCount)} leads in follow-up or needs info`}
-                  />
-                  <MiniStat
-                    title="Interested momentum"
-                    value={formatPct(stats?.comparison?.interested?.pctChange ?? 0)}
-                    subtitle={`Previous period: ${formatNumber(stats?.comparison?.interested?.previous ?? 0)}`}
-                    helper={helperFor("interested")}
-                  />
-                  <MiniStat
-                    title="Top converting agent"
-                    value={topAgent?.name || "-"}
-                    subtitle={
-                      topAgent
-                        ? `Leads: ${formatNumber(topAgent.value)} · Share: ${topAgentShare}`
-                        : "No clear top agent"
-                    }
-                  />
-                  <MiniStat
-                    title="Follow-up drag"
-                    value={`${pct(totalFollowUp)}`}
-                    subtitle={`${formatNumber(totalFollowUp)} leads awaiting conversion`}
-                  />
-                </div>
-
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <ChartCard title="Agent conversion output (top 8)">
-                    <ResponsiveContainer>
-                      <BarChart data={leaderboardRows.slice(0, 8)}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis
-                          dataKey="name"
-                          stroke="#94a3b8"
-                        />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
-                        <Tooltip
-                          contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
-                        />
-                        <Legend />
-                        <Bar dataKey="contacted" name="Contacted" fill="#38BDF8" radius={[6, 6, 0, 0]} />
-                        <Bar dataKey="interested" name="Interested" fill="#22C55E" radius={[6, 6, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-
-                  <ChartCard title="Interested rate by agent (top 8)">
-                    <ResponsiveContainer>
-                      <BarChart data={leaderboardRows.slice(0, 8)}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis dataKey="name" stroke="#94a3b8" />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
-                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                        <Legend />
-                        <ReferenceLine y={30} stroke="#94a3b8" strokeDasharray="4 4" label="Target 30%" />
-                        <Bar dataKey="interestedRate" name="Interested rate %" fill="#F59E0B" radius={[6, 6, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-                </div>
-              </section>
-            )}
-
             {activeOverviewGroup === "team" && (
               <section className="space-y-6">
                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -2198,34 +2096,6 @@ export default function App() {
                         : "Opportunity to speed up first touch"
                     }
                     helperTone={Number(avgTeamResponseDays) <= 2 ? "positive" : "negative"}
-                  />
-                </div>
-
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  <MiniStat
-                    title="Workload concentration"
-                    value={`${topTeamShare}%`}
-                    subtitle={
-                      topTeamAgent
-                        ? `${topTeamAgent.name} carries the largest share`
-                        : "No active agent data"
-                    }
-                  />
-                  <MiniStat
-                    title="Pipeline risk"
-                    value={`${teamPipelineRisk}%`}
-                    subtitle={`${formatNumber(notContactedCount)} leads are still unassigned`}
-                    helper={helperFor("notContacted")}
-                  />
-                  <MiniStat
-                    title="At-risk agents"
-                    value={formatNumber(decliningAgents.length)}
-                    subtitle="Negative contact or interested trend vs previous period"
-                  />
-                  <MiniStat
-                    title="Avg follow-up speed"
-                    value={`${avgTeamFollowUpDays} days`}
-                    subtitle="Lower is better for conversion momentum"
                   />
                 </div>
 
@@ -2270,6 +2140,93 @@ export default function App() {
                     </ResponsiveContainer>
                   </ChartCard>
                 </div>
+
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <ChartCard title="Interested rate benchmark (top 8)">
+                    <ResponsiveContainer>
+                      <BarChart data={teamInterestedRateData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis dataKey="name" stroke="#94a3b8" />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" />
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                        <Legend />
+                        <ReferenceLine y={30} stroke="#94a3b8" strokeDasharray="4 4" label="Target 30%" />
+                        <Bar dataKey="interestedRate" fill="#F59E0B" radius={[6, 6, 0, 0]} name="Interested rate %" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+
+                  <ChartCard title="Avg contacted per day by agent (top 8)">
+                    <ResponsiveContainer>
+                      <BarChart data={teamAvgContactedPerDayData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis dataKey="name" stroke="#94a3b8" />
+                        <YAxis stroke="#94a3b8" />
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                        <Legend />
+                        <Bar
+                          dataKey="avgContactedPerDay"
+                          fill="#38BDF8"
+                          radius={[6, 6, 0, 0]}
+                          name="Avg contacted/day"
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+                </div>
+
+                <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
+                  <h3 className="text-base font-semibold text-slate-100 mb-4">
+                    Team leaderboard
+                  </h3>
+                  <div className="overflow-auto">
+                    <table className="min-w-full text-xs">
+                      <thead className="text-slate-400">
+                        <tr className="text-left">
+                          <th className="py-2 pr-4">Rank</th>
+                          <th className="py-2 pr-4">Agent</th>
+                          <th className="py-2 pr-4">Contacted</th>
+                          <th className="py-2 pr-4">Interested</th>
+                          <th className="py-2 pr-4">Interested rate</th>
+                          <th className="py-2 pr-4">Avg/day</th>
+                          <th className="py-2 pr-4">Avg response</th>
+                          <th className="py-2 pr-4">Top destination</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-slate-100">
+                        {leaderboardRows.slice(0, 12).map((row) => (
+                          <tr
+                            key={`team-leaderboard-${row.name}`}
+                            className={`border-t border-slate-800 ${
+                              row.rank === 1
+                                ? "bg-amber-400/10"
+                                : row.rank === 2
+                                ? "bg-slate-400/10"
+                                : row.rank === 3
+                                ? "bg-amber-700/10"
+                                : ""
+                            }`}
+                          >
+                            <td className="py-2 pr-4 font-medium">
+                              {row.badge} {row.rank}
+                            </td>
+                            <td className="py-2 pr-4">{row.name}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.contacted)}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
+                            <td className="py-2 pr-4">{row.interestedRate}%</td>
+                            <td className="py-2 pr-4">{row.avgContactedPerDay ?? "-"}</td>
+                            <td className="py-2 pr-4">
+                              {Number.isFinite(row.avgResponseDays)
+                                ? `${row.avgResponseDays}d`
+                                : "-"}
+                            </td>
+                            <td className="py-2 pr-4">{row.topCountry || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
               </section>
             )}
 
