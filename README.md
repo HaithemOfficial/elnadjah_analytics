@@ -69,6 +69,14 @@ Full-stack dashboard for Google Form responses stored in Google Sheets.
    - `npm run build`
    - serve `frontend/dist` with Nginx or any static file server
 
+## Sync Local .env To VPS
+If you want to keep secrets local and not commit them, use:
+
+`powershell`
+`./scripts/sync_env_and_restart_vps.ps1 -Host <VPS_IP> -User <SSH_USER> -AppPath </absolute/path/to/analyzer> -Pm2AppName <pm2_backend_app_name>`
+
+This script uploads `backend/.env` to VPS, pulls latest `main`, installs backend deps, and restarts PM2.
+
 ## Notes
 - Date filters are inclusive.
 - The dashboard calculates last 30 days vs previous 30 days to show percentage change.
