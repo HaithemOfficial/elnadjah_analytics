@@ -1902,6 +1902,91 @@ export default function App() {
                       </div>
                     </ChartCard>
                   </div>
+
+                  <div className="grid gap-6 lg:grid-cols-2">
+                    <ChartCard title="Lead acquisition trend">
+                      <p className="-mt-3 mb-3 text-xs text-slate-400">
+                        Tracks lead volume and quality (interested rate) over the selected period.
+                      </p>
+                      <ResponsiveContainer>
+                        <LineChart data={conversionTrendSeries}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                          <XAxis
+                            dataKey="date"
+                            tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                            stroke="#94a3b8"
+                          />
+                          <YAxis yAxisId="volume" allowDecimals={false} stroke="#94a3b8" />
+                          <YAxis yAxisId="rate" orientation="right" stroke="#94a3b8" />
+                          <Tooltip
+                            labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                            contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
+                          />
+                          <Legend />
+                          <Line
+                            yAxisId="volume"
+                            type="monotone"
+                            dataKey="leads"
+                            name="Leads"
+                            stroke="#6366F1"
+                            strokeWidth={3}
+                            dot={false}
+                          />
+                          <Line
+                            yAxisId="volume"
+                            type="monotone"
+                            dataKey="interested"
+                            name="Interested"
+                            stroke="#22C55E"
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                          <Line
+                            yAxisId="rate"
+                            type="monotone"
+                            dataKey="interestedRate"
+                            name="Interested rate %"
+                            stroke="#F59E0B"
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </ChartCard>
+
+                    <ChartCard title="Top source trends over time">
+                      <p className="-mt-3 mb-3 text-xs text-slate-400">
+                        Daily source performance for the top channels in this period.
+                      </p>
+                      <ResponsiveContainer>
+                        <LineChart data={stats?.leadsOverTimeBySource ?? []}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                          <XAxis
+                            dataKey="date"
+                            tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                            stroke="#94a3b8"
+                          />
+                          <YAxis allowDecimals={false} stroke="#94a3b8" />
+                          <Tooltip
+                            labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                            contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
+                          />
+                          <Legend />
+                          {topSourceTrendKeys.map((key, index) => (
+                            <Line
+                              key={`leadgen-source-trend-${key}`}
+                              type="monotone"
+                              dataKey={key}
+                              name={key}
+                              stroke={SOURCE_COLORS[index % SOURCE_COLORS.length]}
+                              strokeWidth={2}
+                              dot={false}
+                            />
+                          ))}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </ChartCard>
+                  </div>
                 </div>
               </section>
             )}
@@ -1965,91 +2050,6 @@ export default function App() {
                     subtitle={`Previous period total: ${formatNumber(stats?.comparison?.totals?.previous ?? 0)}`}
                     helper={totalComparisonHelper}
                   />
-                </div>
-
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <ChartCard title="Lead acquisition trend">
-                    <p className="-mt-3 mb-3 text-xs text-slate-400">
-                      Tracks lead volume and quality (interested rate) over the selected period.
-                    </p>
-                    <ResponsiveContainer>
-                      <LineChart data={conversionTrendSeries}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis
-                          dataKey="date"
-                          tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
-                          stroke="#94a3b8"
-                        />
-                        <YAxis yAxisId="volume" allowDecimals={false} stroke="#94a3b8" />
-                        <YAxis yAxisId="rate" orientation="right" stroke="#94a3b8" />
-                        <Tooltip
-                          labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
-                          contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
-                        />
-                        <Legend />
-                        <Line
-                          yAxisId="volume"
-                          type="monotone"
-                          dataKey="leads"
-                          name="Leads"
-                          stroke="#6366F1"
-                          strokeWidth={3}
-                          dot={false}
-                        />
-                        <Line
-                          yAxisId="volume"
-                          type="monotone"
-                          dataKey="interested"
-                          name="Interested"
-                          stroke="#22C55E"
-                          strokeWidth={2}
-                          dot={false}
-                        />
-                        <Line
-                          yAxisId="rate"
-                          type="monotone"
-                          dataKey="interestedRate"
-                          name="Interested rate %"
-                          stroke="#F59E0B"
-                          strokeWidth={2}
-                          dot={false}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-
-                  <ChartCard title="Top source trends over time">
-                    <p className="-mt-3 mb-3 text-xs text-slate-400">
-                      Daily source performance for the top channels in this period.
-                    </p>
-                    <ResponsiveContainer>
-                      <LineChart data={stats?.leadsOverTimeBySource ?? []}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis
-                          dataKey="date"
-                          tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
-                          stroke="#94a3b8"
-                        />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
-                        <Tooltip
-                          labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
-                          contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
-                        />
-                        <Legend />
-                        {topSourceTrendKeys.map((key, index) => (
-                          <Line
-                            key={`leadgen-source-trend-${key}`}
-                            type="monotone"
-                            dataKey={key}
-                            name={key}
-                            stroke={SOURCE_COLORS[index % SOURCE_COLORS.length]}
-                            strokeWidth={2}
-                            dot={false}
-                          />
-                        ))}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
                 </div>
 
                 <ChartCard title="Lead volume by source (top 8)">
