@@ -201,10 +201,11 @@ function getWeeklySummaryWindow(targetDate) {
   }
 
   const now = dayjs().tz(summaryTimezone);
+  const currentWeekStart = now.startOf("isoWeek");
   return {
     timezone: summaryTimezone,
-    start: now.startOf("isoWeek"),
-    end: now,
+    start: currentWeekStart.subtract(7, "day"),
+    end: currentWeekStart,
   };
 }
 

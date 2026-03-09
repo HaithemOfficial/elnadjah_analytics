@@ -49,7 +49,7 @@ Manual test:
 You can send a weekly performance summary every Friday at 21:00 (9 PM) in your timezone.
 
 Default weekly window:
-- Scheduler mode: current week from Monday 00:00 until send time.
+- Scheduler mode (and manual without `date`): previous full ISO week (Monday 00:00 to next Monday 00:00).
 - Manual mode with `date`: full ISO week containing that date (Monday 00:00 to next Monday 00:00).
 
 1. Configure weekly recipients and timezone in `.env`:
