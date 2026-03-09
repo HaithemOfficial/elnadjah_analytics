@@ -412,16 +412,28 @@ function topCountryByGrowth(leads, startDate, endDate, dateField) {
   const current = countByDestination(startDate, endDate);
   const previous = countByDestination(previousStart, previousEnd);
 
-  let best = null;
-  Object.keys(current).forEach((name) => {
-    const curr = current[name] || 0;
-    const prev = previous[name] || 0;
-    const pct = prev ? ((curr - prev) / prev) * 100 : curr ? 100 : 0;
-    if (!best || pct > best.pctChange) {
-      best = { name, current: curr, previous: prev, pctChange: Math.trunc(pct) };
-    }
-  });
-  return best;
+  const ranked = Object.keys(current)
+    .map((name) => {
+      const curr = current[name] || 0;
+      const prev = previous[name] || 0;
+      const delta = curr - prev;
+      const pct = prev ? ((delta) / prev) * 100 : curr ? 100 : 0;
+      return {
+        name,
+        current: curr,
+        previous: prev,
+        delta,
+        pctChange: Math.trunc(pct),
+      };
+    })
+    .filter((item) => item.delta > 0)
+    .sort((a, b) => {
+      if (b.delta !== a.delta) return b.delta - a.delta;
+      if (b.pctChange !== a.pctChange) return b.pctChange - a.pctChange;
+      return b.current - a.current;
+    });
+
+  return ranked[0] || null;
 }
 
 function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
@@ -1163,6 +1175,52 @@ export default function App() {
     ? ((destinationCoverageCount / activeDestinationCount) * 100).toFixed(1)
     : "0.0";
   const topDestinationTrendKeys = topDestinationRows.slice(0, 4).map((row) => row.name);
+  const destinationLeaderboardRows = useMemo(() => {
+    const dateField = filters.dateField || "timestamp";
+    const startDate =
+      filters.allTime || !filters.startDate
+        ? null
+        : startOfDay(new Date(filters.startDate));
+    const endDate =
+      filters.allTime || !filters.endDate
+        ? null
+        : endOfDay(new Date(filters.endDate));
+
+    const rows = allLeads
+      .filter((lead) => {
+        if (filters.counselor && lead.counselor !== filters.counselor) return false;
+        if (filters.destination && lead.destination !== filters.destination) return false;
+        return inRange(getLeadDate(lead, dateField), startDate, endDate);
+      })
+      .reduce((acc, lead) => {
+        const destinationName = lead.destination || "Unknown";
+        if (!acc[destinationName]) {
+          acc[destinationName] = {
+            name: destinationName,
+            total: 0,
+            assigned: 0,
+            interested: 0,
+          };
+        }
+
+        acc[destinationName].total += 1;
+        if (hasAssignedAgent(lead)) {
+          acc[destinationName].assigned += 1;
+        }
+        if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
+          acc[destinationName].interested += 1;
+        }
+
+        return acc;
+      }, {});
+
+    return Object.values(rows)
+      .map((row) => ({
+        ...row,
+        notContacted: Math.max(row.total - row.assigned, 0),
+      }))
+      .sort((a, b) => b.total - a.total);
+  }, [allLeads, filters]);
   const totalInterested = stats?.totals?.interested ?? 0;
   const totalFollowUp = stats?.totals?.followUp ?? 0;
   const totalNeedsMoreInfo = stats?.totals?.needsMoreInfo ?? 0;
@@ -1301,7 +1359,6 @@ export default function App() {
           <div className="no-scrollbar flex w-full items-center gap-2 overflow-x-auto py-2 px-1 sm:px-2 md:flex-wrap md:overflow-visible">
             {[ 
               { key: "general", label: "General KPIs" },
-              { key: "leadGeneration", label: "Lead Generation KPIs" },
               { key: "team", label: "Team Performance KPIs" },
               { key: "destinations", label: "Destinations KPIs" },
             ].map((group) => (
@@ -1751,9 +1808,9 @@ export default function App() {
                       </div>
                       <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
                         <MiniStat
-                          title="Top country"
-                          value={topCountryGrowth?.name || (countryDetails[0]?.name ?? "-")}
-                          subtitle={topCountryGrowth ? `Growth: ${formatPct(topCountryGrowth.pctChange)}` : countryDetails[0] ? `Leads: ${formatNumber(countryDetails[0].value)}` : ""}
+                          title="Top source"
+                          value={topSource?.name || "-"}
+                          subtitle={topSource ? `Leads: ${formatNumber(topSource.value)} · Share: ${pct(topSource.value)}` : ""}
                         />
                         <MiniStat
                           title="Top agent"
@@ -1768,7 +1825,11 @@ export default function App() {
                         <MiniStat
                           title="Top country (new growing)"
                           value={topCountryGrowth?.name || "-"}
-                          subtitle={topCountryGrowth ? `Growth: ${formatPct(topCountryGrowth.pctChange)}` : ""}
+                          subtitle={
+                            topCountryGrowth
+                              ? `+${formatNumber(topCountryGrowth.delta)} leads (${formatPct(topCountryGrowth.pctChange)})`
+                              : ""
+                          }
                         />
                       </div>
 
@@ -1991,81 +2052,6 @@ export default function App() {
               </section>
             )}
 
-            {activeOverviewGroup === "leadGeneration" && (
-              <section className="space-y-6">
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                  <StatCard
-                    title="Total leads"
-                    value={formatNumber(stats?.totals?.total ?? 0)}
-                    helper={totalComparisonHelper}
-                    helperTone={
-                      Number(stats?.comparison?.totals?.pctChange) >= 0
-                        ? "positive"
-                        : "negative"
-                    }
-                  />
-                  <StatCard
-                    title="Interested rate"
-                    value={`${leadToInterestedRate}%`}
-                    helper="Interested out of all leads in selected period"
-                    helperTone={Number(leadToInterestedRate) >= 20 ? "positive" : "negative"}
-                  />
-                  <StatCard
-                    title="Top source"
-                    value={leadGenTopSourceName}
-                    helper={`${formatNumber(leadGenTopSourceCount)} leads (${topSourceShare}% share)`}
-                    helperTone={null}
-                  />
-                  <StatCard
-                    title="Top 3 source share"
-                    value={`${top3SourceShare}%`}
-                    helper={
-                      Number(top3SourceShare) >= 70
-                        ? "High source concentration"
-                        : "Balanced source mix"
-                    }
-                    helperTone={Number(top3SourceShare) >= 70 ? "negative" : "positive"}
-                  />
-                </div>
-
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  <MiniStat
-                    title="Active sources"
-                    value={formatNumber(activeSourceCount)}
-                    subtitle={`${formatNumber(sourceCoverageCount)} sources with 10+ leads`}
-                  />
-                  <MiniStat
-                    title="Source depth"
-                    value={`${sourceCoverageRate}%`}
-                    subtitle="Share of sources with meaningful volume"
-                  />
-                  <MiniStat
-                    title="Avg leads per source"
-                    value={avgLeadsPerSource}
-                    subtitle="Higher value means stronger channels"
-                  />
-                  <MiniStat
-                    title="Acquisition momentum"
-                    value={formatPct(leadGenGrowthCurrent)}
-                    subtitle={`Previous period total: ${formatNumber(stats?.comparison?.totals?.previous ?? 0)}`}
-                    helper={totalComparisonHelper}
-                  />
-                </div>
-
-                <ChartCard title="Lead volume by source (top 8)">
-                  <ResponsiveContainer>
-                    <BarChart data={topSourceRows}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis dataKey="name" stroke="#94a3b8" />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
-                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                        <Bar dataKey="value" fill="#22C55E" radius={[6, 6, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                </ChartCard>
-              </section>
-            )}
-
             {activeOverviewGroup === "team" && (
               <section className="space-y-6">
                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -2260,7 +2246,7 @@ export default function App() {
                     value={topCountryGrowth?.name || "-"}
                     helper={
                       topCountryGrowth
-                        ? `${formatPct(topCountryGrowth.pctChange)} (${formatNumber(
+                        ? `+${formatNumber(topCountryGrowth.delta)} leads (${formatPct(topCountryGrowth.pctChange)}; ${formatNumber(
                             topCountryGrowth.current
                           )} vs ${formatNumber(topCountryGrowth.previous)})`
                         : "No growth delta for selected period"
@@ -2346,6 +2332,39 @@ export default function App() {
                     </ResponsiveContainer>
                   </ChartCard>
                 </div>
+
+                <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
+                  <h3 className="text-base font-semibold text-slate-100 mb-4">
+                    Destinations leaderboard
+                  </h3>
+                  <div className="overflow-auto">
+                    <table className="min-w-full text-xs">
+                      <thead className="text-slate-400">
+                        <tr className="text-left">
+                          <th className="py-2 pr-4">Destination</th>
+                          <th className="py-2 pr-4">Total leads</th>
+                          <th className="py-2 pr-4">Assigned</th>
+                          <th className="py-2 pr-4">Interested</th>
+                          <th className="py-2 pr-4">Not contacted</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-slate-100">
+                        {destinationLeaderboardRows.slice(0, 15).map((row) => (
+                          <tr
+                            key={`destinations-leaderboard-${row.name}`}
+                            className="border-t border-slate-800"
+                          >
+                            <td className="py-2 pr-4">{row.name}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.total)}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.assigned)}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.notContacted)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
               </section>
             )}
           </>
