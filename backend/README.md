@@ -19,6 +19,7 @@
 - GET `/api/leads`
 - GET `/api/stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&counselor=Name`
 - POST `/api/notifications/daily-summary/send` (auth required)
+- POST `/api/notifications/weekly-summary/send` (auth required)
 
 ## Daily Email Summary
 You can send a daily summary email at 09:00 for the previous calendar day window (00:00 to 00:00 in your timezone).
@@ -43,3 +44,22 @@ Included metrics:
 Manual test:
 - Send a POST request to `/api/notifications/daily-summary/send` with your auth token.
 - Optional custom window start date (YYYY-MM-DD): `POST /api/notifications/daily-summary/send` with body `{ "date": "2026-02-13" }`.
+
+## Weekly Email Summary
+You can send a weekly performance summary every Friday at 21:00 (9 PM) in your timezone.
+
+Default weekly window:
+- Scheduler mode: current week from Monday 00:00 until send time.
+- Manual mode with `date`: full ISO week containing that date (Monday 00:00 to next Monday 00:00).
+
+1. Configure weekly recipients and timezone in `.env`:
+   - `WEEKLY_SUMMARY_RECIPIENTS` (falls back to `DAILY_SUMMARY_RECIPIENTS` if not set)
+   - `WEEKLY_SUMMARY_TIMEZONE` (falls back to `DAILY_SUMMARY_TIMEZONE`)
+2. Enable weekly scheduler:
+   - `WEEKLY_SUMMARY_ENABLED=true`
+   - `WEEKLY_SUMMARY_CRON=0 21 * * 5` (Friday 21:00)
+3. Restart backend.
+
+Manual weekly test:
+- Send a POST request to `/api/notifications/weekly-summary/send` with your auth token.
+- Optional reference date (YYYY-MM-DD): `POST /api/notifications/weekly-summary/send` with body `{ "date": "2026-03-08" }`.

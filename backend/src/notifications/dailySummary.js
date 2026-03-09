@@ -2,12 +2,14 @@ const dayjs = require("dayjs");
 const customParseFormat = require("dayjs/plugin/customParseFormat");
 const utc = require("dayjs/plugin/utc");
 const timezone = require("dayjs/plugin/timezone");
+const isoWeek = require("dayjs/plugin/isoWeek");
 const nodemailer = require("nodemailer");
 const { getSheetRows } = require("../sheets");
 
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
+dayjs.extend(isoWeek);
 
 const HEADER_MAP = {
   timestamp: ["timestamp", "time", "submitted at", "تاريخ"],
@@ -178,8 +180,35 @@ function getSummaryWindow(targetDate) {
   };
 }
 
-function buildDailySummary(leads, targetDate) {
-  const window = getSummaryWindow(targetDate);
+function getWeeklySummaryWindow(targetDate) {
+  const summaryTimezone =
+    process.env.WEEKLY_SUMMARY_TIMEZONE ||
+    process.env.DAILY_SUMMARY_TIMEZONE ||
+    "UTC";
+
+  if (targetDate) {
+    const ref = dayjs.tz(targetDate, "YYYY-MM-DD", summaryTimezone);
+    if (!ref.isValid()) {
+      throw new Error("Invalid target date. Use YYYY-MM-DD.");
+    }
+
+    const start = ref.startOf("isoWeek");
+    return {
+      timezone: summaryTimezone,
+      start,
+      end: start.add(7, "day"),
+    };
+  }
+
+  const now = dayjs().tz(summaryTimezone);
+  return {
+    timezone: summaryTimezone,
+    start: now.startOf("isoWeek"),
+    end: now,
+  };
+}
+
+function buildSummaryForWindow(leads, window, label) {
   const { start, end, timezone: summaryTimezone } = window;
 
   const periodLeads = leads.filter((lead) => {
@@ -219,7 +248,9 @@ function buildDailySummary(leads, targetDate) {
       total: stats.total,
       assigned: stats.assigned,
       notContacted: Math.max(stats.total - stats.assigned, 0),
-      contactedRate: stats.total ? ((stats.assigned / stats.total) * 100).toFixed(1) : "0.0",
+      contactedRate: stats.total
+        ? ((stats.assigned / stats.total) * 100).toFixed(1)
+        : "0.0",
     }))
     .sort((a, b) => b.total - a.total);
 
@@ -230,6 +261,7 @@ function buildDailySummary(leads, targetDate) {
     .map(([name, count]) => ({ name, count }));
 
   return {
+    type: label,
     date: start.format("YYYY-MM-DD"),
     period: {
       start: start.format("YYYY-MM-DD HH:mm"),
@@ -248,6 +280,16 @@ function buildDailySummary(leads, targetDate) {
     destinations,
     topAgents,
   };
+}
+
+function buildDailySummary(leads, targetDate) {
+  const window = getSummaryWindow(targetDate);
+  return buildSummaryForWindow(leads, window, "daily");
+}
+
+function buildWeeklySummary(leads, targetDate) {
+  const window = getWeeklySummaryWindow(targetDate);
+  return buildSummaryForWindow(leads, window, "weekly");
 }
 
 function parseRecipients(value) {
@@ -276,6 +318,7 @@ function getTransporter() {
 }
 
 function buildEmailHtml(summary) {
+  const heading = summary.type === "weekly" ? "ElNadjah Weekly Summary" : "ElNadjah Daily Summary";
   const topAgentsRows = summary.topAgents.length
     ? summary.topAgents
         .map(
@@ -296,7 +339,7 @@ function buildEmailHtml(summary) {
 
   return `
     <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;color:#0f172a;">
-      <h2 style="margin-bottom:4px;">ElNadjah Daily Summary</h2>
+      <h2 style="margin-bottom:4px;">${heading}</h2>
       <p style="margin-top:0;color:#475569;">Period: ${summary.period.start} -> ${summary.period.end} (${summary.period.timezone})</p>
 
       <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0;">
@@ -372,6 +415,44 @@ async function sendDailySummaryEmail(summary) {
   return { messageId: info.messageId, recipients };
 }
 
+async function sendWeeklySummaryEmail(summary) {
+  const recipients = parseRecipients(
+    process.env.WEEKLY_SUMMARY_RECIPIENTS || process.env.DAILY_SUMMARY_RECIPIENTS
+  );
+  const from = process.env.SMTP_FROM;
+  const transporter = getTransporter();
+
+  if (!recipients.length) {
+    throw new Error("WEEKLY_SUMMARY_RECIPIENTS (or DAILY_SUMMARY_RECIPIENTS) is not configured.");
+  }
+  if (!from) {
+    throw new Error("SMTP_FROM is not configured.");
+  }
+  if (!transporter) {
+    throw new Error("SMTP settings are incomplete (SMTP_HOST/PORT/USER/PASS).");
+  }
+
+  const subject = `ElNadjah Weekly Summary - Week of ${summary.date}`;
+  const text = [
+    `ElNadjah Weekly Summary (${summary.period.start} -> ${summary.period.end} ${summary.period.timezone})`,
+    `Total leads: ${summary.total}`,
+    `Assigned: ${summary.assigned} (${summary.assignedRate}%)`,
+    `Not contacted: ${summary.notContacted}`,
+    `Interested: ${summary.interested} (${summary.interestedRate}%)`,
+    `Top destination: ${summary.topDestination ? `${summary.topDestination.name} (${summary.topDestination.count})` : "-"}`,
+  ].join("\n");
+
+  const info = await transporter.sendMail({
+    from,
+    to: recipients.join(","),
+    subject,
+    text,
+    html: buildEmailHtml(summary),
+  });
+
+  return { messageId: info.messageId, recipients };
+}
+
 async function runDailySummaryEmail(trigger = "manual", targetDate) {
   const rows = await getSheetRows();
   const leads = rowsToMinimalLeads(rows);
@@ -385,6 +466,20 @@ async function runDailySummaryEmail(trigger = "manual", targetDate) {
   };
 }
 
+async function runWeeklySummaryEmail(trigger = "manual", targetDate) {
+  const rows = await getSheetRows();
+  const leads = rowsToMinimalLeads(rows);
+  const summary = buildWeeklySummary(leads, targetDate);
+  const delivery = await sendWeeklySummaryEmail(summary);
+
+  return {
+    trigger,
+    summary,
+    delivery,
+  };
+}
+
 module.exports = {
   runDailySummaryEmail,
+  runWeeklySummaryEmail,
 };
