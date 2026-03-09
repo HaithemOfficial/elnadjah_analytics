@@ -229,15 +229,35 @@ function buildSummaryForWindow(leads, window, label) {
 
   periodLeads.forEach((lead) => {
     const destination = lead.destination || "Unknown";
+    const isInterested =
+      normalizeStatusCategory(lead.status) === "Interested / Will apply";
 
     if (!destinationStats[destination]) {
-      destinationStats[destination] = { total: 0, assigned: 0 };
+      destinationStats[destination] = { total: 0, assigned: 0, interested: 0 };
     }
     destinationStats[destination].total += 1;
+    if (isInterested) {
+      destinationStats[destination].interested += 1;
+    }
 
     if (hasAssignedAgent(lead)) {
       const agent = lead.counselor.trim();
-      byAgent[agent] = (byAgent[agent] || 0) + 1;
+      if (!byAgent[agent]) {
+        byAgent[agent] = {
+          contacted: 0,
+          interested: 0,
+          destinations: {},
+        };
+      }
+
+      byAgent[agent].contacted += 1;
+      if (isInterested) {
+        byAgent[agent].interested += 1;
+      }
+
+      byAgent[agent].destinations[destination] =
+        (byAgent[agent].destinations[destination] || 0) + 1;
+
       destinationStats[destination].assigned += 1;
     }
   });
@@ -247,6 +267,7 @@ function buildSummaryForWindow(leads, window, label) {
       name,
       total: stats.total,
       assigned: stats.assigned,
+      interested: stats.interested,
       notContacted: Math.max(stats.total - stats.assigned, 0),
       contactedRate: stats.total
         ? ((stats.assigned / stats.total) * 100).toFixed(1)
@@ -255,10 +276,32 @@ function buildSummaryForWindow(leads, window, label) {
     .sort((a, b) => b.total - a.total);
 
   const topDestination = destinations[0] || null;
+  const daysCount = Math.max(end.diff(start, "day", true), 1);
   const topAgents = Object.entries(byAgent)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([name, count]) => ({ name, count }));
+    .map(([name, stats]) => {
+      const topDestinationEntry = Object.entries(stats.destinations).sort(
+        (a, b) => b[1] - a[1]
+      )[0];
+
+      return {
+        name,
+        contacted: stats.contacted,
+        interested: stats.interested,
+        interestedRate: stats.contacted
+          ? ((stats.interested / stats.contacted) * 100).toFixed(1)
+          : "0.0",
+        avgPerDay: (stats.contacted / daysCount).toFixed(1),
+        topDestination: topDestinationEntry
+          ? { name: topDestinationEntry[0], count: topDestinationEntry[1] }
+          : null,
+      };
+    })
+    .sort((a, b) => b.contacted - a.contacted)
+    .slice(0, 10)
+    .map((agent, index) => ({
+      rank: index + 1,
+      ...agent,
+    }));
 
   return {
     type: label,
@@ -319,23 +362,30 @@ function getTransporter() {
 
 function buildEmailHtml(summary) {
   const heading = summary.type === "weekly" ? "ElNadjah Weekly Summary" : "ElNadjah Daily Summary";
-  const topAgentsRows = summary.topAgents.length
-    ? summary.topAgents
-        .map(
-          (item, index) =>
-            `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${index + 1}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.name}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.count}</td></tr>`
-        )
-        .join("")
-    : "<tr><td colspan=\"3\" style=\"padding:6px 10px;color:#64748b;\">No assigned agents in this period.</td></tr>";
-
   const destinationsRows = summary.destinations.length
     ? summary.destinations
-        .map(
-          (item) =>
-            `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.name}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.total}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.assigned}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.contactedRate}%</td></tr>`
-        )
+        .map((item) => {
+          const weeklyCols =
+            summary.type === "weekly"
+              ? `<td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.interested}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.notContacted}</td>`
+              : `<td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.contactedRate}%</td>`;
+
+          return `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.name}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.total}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.assigned}</td>${weeklyCols}</tr>`;
+        })
         .join("")
-    : "<tr><td colspan=\"4\" style=\"padding:6px 10px;color:#64748b;\">No destination data in this period.</td></tr>";
+    : "<tr><td colspan=\"5\" style=\"padding:6px 10px;color:#64748b;\">No destination data in this period.</td></tr>";
+
+  const topAgentsRows = summary.topAgents.length
+    ? summary.topAgents
+        .map((item, index) => {
+          if (summary.type === "weekly") {
+            return `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.rank || index + 1}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.name}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.contacted}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.interested}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.interestedRate}%</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.avgPerDay}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.topDestination ? `${item.topDestination.name} (${item.topDestination.count})` : "-"}</td></tr>`;
+          }
+
+          return `<tr><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${index + 1}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.name}</td><td style=\"padding:6px 10px;border-bottom:1px solid #e2e8f0;\">${item.contacted}</td></tr>`;
+        })
+        .join("")
+    : "<tr><td colspan=\"7\" style=\"padding:6px 10px;color:#64748b;\">No assigned agents in this period.</td></tr>";
 
   return `
     <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;color:#0f172a;">
@@ -351,26 +401,34 @@ function buildEmailHtml(summary) {
 
       <p><strong>Top destination:</strong> ${summary.topDestination ? `${summary.topDestination.name} (${summary.topDestination.count})` : "-"}</p>
 
-      <h3 style="margin-bottom:8px;">Destinations (period totals)</h3>
+      <h3 style="margin-bottom:8px;">Destinations leaderboard</h3>
       <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:16px;">
         <thead>
           <tr style="background:#f1f5f9;text-align:left;">
             <th style="padding:6px 10px;">Destination</th>
             <th style="padding:6px 10px;">Total leads</th>
             <th style="padding:6px 10px;">Assigned</th>
-            <th style="padding:6px 10px;">Contacted ratio</th>
+            ${
+              summary.type === "weekly"
+                ? '<th style="padding:6px 10px;">Interested</th><th style="padding:6px 10px;">Not contacted</th>'
+                : '<th style="padding:6px 10px;">Contacted ratio</th>'
+            }
           </tr>
         </thead>
         <tbody>${destinationsRows}</tbody>
       </table>
 
-      <h3 style="margin-bottom:8px;">Top agents by assigned leads</h3>
+      <h3 style="margin-bottom:8px;">Team leaderboard</h3>
       <table style="width:100%;border-collapse:collapse;font-size:14px;">
         <thead>
           <tr style="background:#f1f5f9;text-align:left;">
             <th style="padding:6px 10px;">#</th>
             <th style="padding:6px 10px;">Agent</th>
-            <th style="padding:6px 10px;">Assigned leads</th>
+            ${
+              summary.type === "weekly"
+                ? '<th style="padding:6px 10px;">Contacted</th><th style="padding:6px 10px;">Interested</th><th style="padding:6px 10px;">Interested rate</th><th style="padding:6px 10px;">Avg/day</th><th style="padding:6px 10px;">Top destination</th>'
+                : '<th style="padding:6px 10px;">Assigned leads</th>'
+            }
           </tr>
         </thead>
         <tbody>${topAgentsRows}</tbody>
@@ -439,7 +497,11 @@ async function sendWeeklySummaryEmail(summary) {
     `Assigned: ${summary.assigned} (${summary.assignedRate}%)`,
     `Not contacted: ${summary.notContacted}`,
     `Interested: ${summary.interested} (${summary.interestedRate}%)`,
-    `Top destination: ${summary.topDestination ? `${summary.topDestination.name} (${summary.topDestination.count})` : "-"}`,
+    "Team leaderboard:",
+    ...summary.topAgents.slice(0, 5).map(
+      (agent) =>
+        `- #${agent.rank} ${agent.name}: Contacted ${agent.contacted}, Interested ${agent.interested}, Interested rate ${agent.interestedRate}%, Avg/day ${agent.avgPerDay}, Top destination ${agent.topDestination ? `${agent.topDestination.name} (${agent.topDestination.count})` : "-"}`
+    ),
   ].join("\n");
 
   const info = await transporter.sendMail({
