@@ -192,20 +192,31 @@ function getWeeklySummaryWindow(targetDate) {
       throw new Error("Invalid target date. Use YYYY-MM-DD.");
     }
 
-    const start = ref.startOf("isoWeek");
+    // Weekly period is always Friday 00:00 -> next Friday 00:00 (end excluded).
+    let end = ref.startOf("day").day(5);
+    if (!end.isAfter(ref.startOf("day"))) {
+      end = end.add(7, "day");
+    }
+    const start = end.subtract(7, "day");
     return {
       timezone: summaryTimezone,
       start,
-      end: start.add(7, "day"),
+      end,
     };
   }
 
   const now = dayjs().tz(summaryTimezone);
-  const currentWeekStart = now.startOf("isoWeek");
+
+  // Default run uses the last fully closed Friday-based week.
+  let end = now.startOf("day").day(5);
+  if (end.isAfter(now)) {
+    end = end.subtract(7, "day");
+  }
+
   return {
     timezone: summaryTimezone,
-    start: currentWeekStart.subtract(7, "day"),
-    end: currentWeekStart,
+    start: end.subtract(7, "day"),
+    end,
   };
 }
 

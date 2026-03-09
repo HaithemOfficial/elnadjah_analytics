@@ -49,8 +49,8 @@ Manual test:
 You can send a weekly performance summary every Friday at 21:00 (9 PM) in your timezone.
 
 Default weekly window:
-- Scheduler mode (and manual without `date`): previous full ISO week (Monday 00:00 to next Monday 00:00).
-- Manual mode with `date`: full ISO week containing that date (Monday 00:00 to next Monday 00:00).
+- Scheduler mode (and manual without `date`): previous full Friday-based week (Friday 00:00 to next Friday 00:00, end excluded).
+- Manual mode with `date`: Friday-based 7-day window that contains the provided date (Friday 00:00 to next Friday 00:00, end excluded).
 
 1. Configure weekly recipients and timezone in `.env`:
    - `WEEKLY_SUMMARY_RECIPIENTS` (falls back to `DAILY_SUMMARY_RECIPIENTS` if not set)
