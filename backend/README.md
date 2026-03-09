@@ -18,3 +18,28 @@
 - POST `/api/auth/logout`
 - GET `/api/leads`
 - GET `/api/stats?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&counselor=Name`
+- POST `/api/notifications/daily-summary/send` (auth required)
+
+## Daily Email Summary
+You can send a daily summary email at 09:00 for the previous calendar day window (00:00 to 00:00 in your timezone).
+
+Included metrics:
+- Total leads
+- Assigned leads + assigned ratio
+- Not contacted leads
+- Interested leads + interested ratio
+- Destination totals with contacted ratio for each destination
+- Top agents by assigned leads
+
+1. Configure SMTP and recipients in `.env`:
+   - `DAILY_SUMMARY_RECIPIENTS`
+   - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`
+2. Enable scheduler:
+   - `DAILY_SUMMARY_ENABLED=true`
+   - `DAILY_SUMMARY_CRON=0 9 * * *` (default 09:00)
+   - `DAILY_SUMMARY_TIMEZONE=UTC`
+3. Restart backend.
+
+Manual test:
+- Send a POST request to `/api/notifications/daily-summary/send` with your auth token.
+- Optional custom window start date (YYYY-MM-DD): `POST /api/notifications/daily-summary/send` with body `{ "date": "2026-02-13" }`.

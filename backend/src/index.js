@@ -4,7 +4,9 @@ const dotenv = require("dotenv");
 const path = require("path");
 const leadsRouter = require("./routes/leads");
 const authRouter = require("./routes/auth");
+const notificationsRouter = require("./routes/notifications");
 const { requireAuth } = require("./auth");
+const { startNotificationScheduler } = require("./notifications/scheduler");
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
@@ -24,6 +26,9 @@ app.get("/api/health", (_req, res) => {
 
 app.use("/api/auth", authRouter);
 app.use("/api", requireAuth, leadsRouter);
+app.use("/api/notifications", requireAuth, notificationsRouter);
+
+startNotificationScheduler();
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {

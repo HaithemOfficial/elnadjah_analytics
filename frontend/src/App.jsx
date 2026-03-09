@@ -219,7 +219,7 @@ function inRange(date, startDate, endDate) {
 }
 
 const diffDaysInclusive = (startDate, endDate) =>
-  Math.max(1, Math.round((endOfDay(endDate).getTime() - startOfDay(startDate).getTime()) / 86400000) + 1);
+  Math.max(1, Math.floor((endOfDay(endDate).getTime() - startOfDay(startDate).getTime()) / 86400000) + 1);
 
 function groupCount(leads, key, emptyLabel = "Unknown") {
   const counts = {};
@@ -1083,9 +1083,9 @@ export default function App() {
   const rangeDays = stats?.range?.startDate && stats?.range?.endDate
     ? Math.max(
         1,
-        Math.round(
-          (new Date(stats.range.endDate).getTime() -
-            new Date(stats.range.startDate).getTime()) /
+        Math.floor(
+          (endOfDay(new Date(stats.range.endDate)).getTime() -
+            startOfDay(new Date(stats.range.startDate)).getTime()) /
             86400000
         ) + 1
       )
