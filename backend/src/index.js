@@ -24,9 +24,19 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// Backward-compatible health route for deployments where proxy strips "/api".
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
 app.use("/api/auth", authRouter);
 app.use("/api", requireAuth, leadsRouter);
 app.use("/api/notifications", requireAuth, notificationsRouter);
+
+// Compatibility routes when reverse proxy strips "/api" from upstream path.
+app.use("/auth", authRouter);
+app.use("/", requireAuth, leadsRouter);
+app.use("/notifications", requireAuth, notificationsRouter);
 
 startNotificationScheduler();
 
