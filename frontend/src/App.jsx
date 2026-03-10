@@ -32,7 +32,37 @@ const SOURCE_COLORS = [
   "#F97316",
   "#E11D48",
 ];
-const API_BASE = import.meta.env.VITE_API_URL || "";
+const configuredApiBase = String(import.meta.env.VITE_API_URL || "").trim();
+const isLocalApiHost = /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(
+  configuredApiBase
+);
+
+const API_BASE = (() => {
+  // In production, never use a localhost API URL because browsers resolve it to each visitor's machine.
+  if (!import.meta.env.DEV && isLocalApiHost) return "";
+  return configuredApiBase.replace(/\/$/, "");
+})();
+
+const normalizeApiPath = (path) => (path.startsWith("/") ? path : `/${path}`);
+const stripApiPrefix = (path) => path.replace(/^\/api(?=\/)/, "");
+
+const apiFetch = async (path, options) => {
+  const normalizedPath = normalizeApiPath(path);
+  const primaryResponse = await fetch(`${API_BASE}${normalizedPath}`, options);
+
+  // Some production proxies strip "/api" before forwarding to backend.
+  const canRetryWithoutApiPrefix =
+    primaryResponse.status === 404 &&
+    normalizedPath.startsWith("/api/") &&
+    !/^https?:\/\//i.test(API_BASE);
+
+  if (!canRetryWithoutApiPrefix) {
+    return primaryResponse;
+  }
+
+  const fallbackPath = stripApiPrefix(normalizedPath);
+  return fetch(`${API_BASE}${fallbackPath}`, options);
+};
 const AUTH_TOKEN_KEY = "leadAnalyzerAuthToken";
 const AUTH_USER_KEY = "leadAnalyzerAuthUser";
 
@@ -713,7 +743,7 @@ export default function App() {
   const logout = async () => {
     try {
       if (authToken) {
-        await fetch(`${API_BASE}/api/auth/logout`, {
+        await apiFetch("/api/auth/logout", {
           method: "POST",
           headers: { Authorization: `Bearer ${authToken}` },
         });
@@ -742,7 +772,7 @@ export default function App() {
     setLoginError("");
 
     try {
-      const response = await fetch(`${API_BASE}/api/auth/login`, {
+      const response = await apiFetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: loginEmail, password: loginPassword }),
@@ -799,7 +829,7 @@ export default function App() {
       setLoading(true);
       setError("");
       try {
-        const response = await fetch(`${API_BASE}/api/leads`, {
+        const response = await apiFetch("/api/leads", {
           headers: { Authorization: `Bearer ${authToken}` },
         });
         if (!response.ok) {
