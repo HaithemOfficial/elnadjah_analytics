@@ -27,20 +27,76 @@ async function getCachedLeads() {
 }
 
 const HEADER_MAP = {
-  timestamp: ["timestamp", "time", "submitted at", "تاريخ"],
-  email: ["email", "email address", "البريد"],
-  name: ["name", "full name", "الاسم"],
-  phone: ["phone", "phone number", "mobile", "الهاتف", "رقم"],
-  counselor: ["counselor", "counsellor", "مستشار", "استشار"],
-  status: ["lead status", "status", "stage", "الحالة", "مرحلة"],
+  timestamp: ["timestamp", "time", "submitted at", "date", "تاريخ", "التاريخ", "الوقت"],
+  email: ["email", "email address", "mail", "البريد", "الايميل"],
+  eligibility: ["eligibility", "eligible", "not eligible", "مؤهل", "غير مؤهل"],
+  name: ["name", "full name", "lead name", "الاسم", "اسم"],
+  phone: ["phone", "phone number", "mobile", "mobile number", "الهاتف", "رقم"],
+  counselor: [
+    "counselor",
+    "counsellor",
+    "agent",
+    "owner",
+    "advisor",
+    "مستشار",
+    "استشار",
+    "الوكيل",
+    "المكلف",
+  ],
+  status: [
+    "lead status",
+    "status",
+    "stage",
+    "pipeline",
+    "الحالة",
+    "مرحلة",
+    "المرحلة",
+  ],
   adFlag: ["ad", "ads", "camp", "اعلان", "إعلان"],
-  destination: ["destination", "country", "وجهة", "الدولة", "بلد"],
-  bac: ["bac", "baccalaureate", "finance", "financial status", "المالية", "تمويل"],
-  source: ["source", "مصدر", "السوشيال", "انستغرام", "تيك توك", "فيسبوك"],
-  level: ["level", "المستوى", "niveau"],
+  destination: ["destination", "country", "target country", "وجهة", "الوجهة", "الدولة", "بلد"],
+  bac: [
+    "bac",
+    "baccalaureate",
+    "average",
+    "score",
+    "moyenne",
+    "معدل البكالوريا",
+    "البكالوريا",
+    "المالية",
+    "تمويل",
+  ],
+  budget: [
+    "budget",
+    "estimated budget",
+    "financial budget",
+    "كم تقدر ميزانيتك",
+    "ميزانيتك",
+  ],
+  source: [
+    "source",
+    "channel",
+    "how did you find",
+    "كيف وجدتنا",
+    "مصدر",
+    "السوشيال",
+    "instagram",
+    "tiktok",
+    "facebook",
+    "youtube",
+  ],
+  level: ["level", "المستوى", "مستواك", "niveau"],
   year: ["year", "السنة", "سنة"],
-  lastStateUpdate: ["last state", "update", "آخر", "تاريخ"],
-  firstContact: ["first contact", "contacted", "تواصل", "اتصال"],
+  lastStateUpdate: [
+    "edited timestamp",
+    "edited at",
+    "stage edited",
+    "last state",
+    "last update",
+    "updated at",
+    "آخر تعديل",
+    "آخر تحديث",
+  ],
+  firstContact: ["first contact", "contacted", "contact date", "تواصل", "اتصال", "أول تواصل"],
 };
 
 const normalize = (value) => String(value || "").trim().toLowerCase();
@@ -173,6 +229,7 @@ function rowsToLeads(rows) {
       return {
         timestamp,
         email: getValue("email") || "",
+        eligibility: getValue("eligibility") || "",
         name: getValue("name") || "",
         phone: getValue("phone") || "",
         counselor: getValue("counselor") || "",
@@ -180,6 +237,7 @@ function rowsToLeads(rows) {
         adFlag: getValue("adFlag") || "",
         destination: getValue("destination") || "",
         bac: getValue("bac") || "",
+        budget: getValue("budget") || "",
         source: getValue("source") || "",
         level: getValue("level") || "",
         year: getValue("year") || "",
@@ -200,7 +258,12 @@ function getLeadDate(lead, dateField) {
 }
 
 function getContactDate(lead) {
-  return lead.firstContact || null;
+  // Contacted is defined strictly by column V (Edited timestamp).
+  return lead.lastStateUpdate || null;
+}
+
+function hasContactedLead(lead) {
+  return Boolean(getContactDate(lead));
 }
 
 function filterLeads(leads, {
@@ -367,15 +430,17 @@ function leadsOverTimeInterested(leads, dateField, granularity) {
     .map((date) => ({ date, count: counts[date] }));
 }
 
-function leadsOverTimeByCounselor(leads, dateField, granularity) {
+function leadsOverTimeByCounselor(leads, granularity, startDate, endDate) {
   const buckets = {};
   const format = granularity === "month" ? "YYYY-MM" : "YYYY-MM-DD";
 
   leads.forEach((lead) => {
     if (!lead.counselor) return;
-    const leadDate = getLeadDate(lead, dateField);
-    if (!leadDate) return;
-    const key = dayjs(leadDate).format(format);
+    const contactDate = getContactDate(lead);
+    if (!contactDate) return;
+    if (startDate && dayjs(contactDate).isBefore(startDate, "day")) return;
+    if (endDate && dayjs(contactDate).isAfter(endDate, "day")) return;
+    const key = dayjs(contactDate).format(format);
     const counselor = lead.counselor;
 
     if (!buckets[key]) buckets[key] = { date: key };
@@ -399,8 +464,14 @@ function leadsOverTimePerformance(leads, dateField, granularity, startDate, endD
     ) {
       const key = dayjs(leadDate).format(format);
       totals[key] = (totals[key] || 0) + 1;
-      if (lead.counselor) {
-        contacted[key] = (contacted[key] || 0) + 1;
+      const contactDate = getContactDate(lead);
+      if (
+        contactDate &&
+        (!startDate || !dayjs(contactDate).isBefore(startDate, "day")) &&
+        (!endDate || !dayjs(contactDate).isAfter(endDate, "day"))
+      ) {
+        const contactKey = dayjs(contactDate).format(format);
+        contacted[contactKey] = (contacted[contactKey] || 0) + 1;
       }
     }
   });
@@ -528,7 +599,7 @@ function countStatusInRange(leads, startDate, endDate, dateField) {
   };
 
   filtered.forEach((lead) => {
-    if (!lead.counselor) counts.notContacted += 1;
+    if (!hasContactedLead(lead)) counts.notContacted += 1;
     const category = normalizeStatusCategory(lead.status);
     if (category === "Interested / Will apply") counts.interested += 1;
     if (category === "Follow-Up / No Reply") counts.followUp += 1;
@@ -673,13 +744,13 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
 
   leads.forEach((lead) => {
     if (!lead.counselor) return;
-    const leadDate = getLeadDate(lead, dateField);
-    if (!leadDate) return;
+    const contactDate = getContactDate(lead);
+    if (!contactDate) return;
 
     const targetMap =
       periodStart && periodEnd
-        ? dayjs(leadDate).isBefore(periodStart, "day") ||
-          dayjs(leadDate).isAfter(periodEnd, "day")
+        ? dayjs(contactDate).isBefore(periodStart, "day") ||
+          dayjs(contactDate).isAfter(periodEnd, "day")
           ? null
           : current
         : current;
@@ -698,7 +769,6 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
       row.interested += 1;
     }
 
-    const contactDate = getContactDate(lead);
     if (lead.timestamp && contactDate) {
       const days = dayjs(contactDate)
         .startOf("day")
@@ -721,11 +791,11 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
   if (prevStart && prevEnd) {
     leads.forEach((lead) => {
       if (!lead.counselor) return;
-      const leadDate = getLeadDate(lead, dateField);
-      if (!leadDate) return;
+      const contactDate = getContactDate(lead);
+      if (!contactDate) return;
       if (
-        dayjs(leadDate).isBefore(prevStart, "day") ||
-        dayjs(leadDate).isAfter(prevEnd, "day")
+        dayjs(contactDate).isBefore(prevStart, "day") ||
+        dayjs(contactDate).isAfter(prevEnd, "day")
       ) {
         return;
       }
@@ -740,7 +810,6 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
       if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
         row.interested += 1;
       }
-      const contactDate = getContactDate(lead);
       if (lead.timestamp && contactDate) {
         const days = dayjs(contactDate)
           .startOf("day")
@@ -810,6 +879,35 @@ function uniqueAgents(leads) {
   return Array.from(set).sort((a, b) => a.localeCompare(b));
 }
 
+router.get("/debug/sheet-columns", async (req, res) => {
+  try {
+    const { getSheetRows } = require("../sheets");
+    const rows = await getSheetRows();
+    if (!rows.length) return res.json({ ok: false, error: "No rows returned from sheet." });
+
+    const headerRow = rows[0];
+    const headerIndex = mapHeaders(headerRow);
+
+    const sample = rows.slice(1, 6).map((row, i) => ({
+      row: i + 2,
+      counselor: headerIndex.counselor >= 0 ? (row[headerIndex.counselor] || "") : "(col not found)",
+      lastStateUpdate_raw: headerIndex.lastStateUpdate >= 0 ? (row[headerIndex.lastStateUpdate] ?? "(empty)") : "(col not found)",
+      lastStateUpdate_parsed: headerIndex.lastStateUpdate >= 0 ? String(parseDate(row[headerIndex.lastStateUpdate])) : null,
+      timestamp_raw: headerIndex.timestamp >= 0 ? (row[headerIndex.timestamp] ?? "(empty)") : "(col not found)",
+    }));
+
+    res.json({
+      ok: true,
+      totalRows: rows.length - 1,
+      headers: headerRow.map((h, i) => ({ index: i, col: String.fromCharCode(65 + i), header: h })),
+      detectedIndices: headerIndex,
+      sample,
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 router.get("/leads", async (req, res) => {
   try {
     const { leads } = await getCachedLeads();
@@ -867,9 +965,19 @@ router.get("/stats", async (req, res) => {
     const destinationGroups = groupCount(filtered, "destination");
     const sourceGroups = groupCount(filtered, "source");
     const financeGroups = groupCount(filtered, "bac");
+    const eligibilityGroups = groupCount(filtered, "eligibility", "Unknown");
+    const stageGroups = groupCount(filtered, "status", "No stage");
 
     const totals = {
       total: filtered.length,
+      eligible: filtered.filter((lead) => {
+        const value = normalize(lead.eligibility);
+        return value.includes("eligible") && !value.includes("not");
+      }).length,
+      notEligible: filtered.filter((lead) => {
+        const value = normalize(lead.eligibility);
+        return value.includes("not eligible");
+      }).length,
       interested: filtered.filter(
         (lead) => normalizeStatusCategory(lead.status) === "Interested / Will apply"
       ).length,
@@ -888,10 +996,10 @@ router.get("/stats", async (req, res) => {
         (lead) =>
           normalizeStatusCategory(lead.status) === "Not obvious / You Don't Know"
       ).length,
-      notContacted: filtered.filter((lead) => !lead.counselor).length,
+      notContacted: filtered.filter((lead) => !hasContactedLead(lead)).length,
     };
 
-    const contactedCount = filtered.filter((lead) => lead.counselor).length;
+    const contactedCount = filtered.filter(hasContactedLead).length;
     const responseRate = filtered.length
       ? Math.trunc((contactedCount / filtered.length) * 100)
       : 0;
@@ -935,10 +1043,12 @@ router.get("/stats", async (req, res) => {
       topCountryGrowth: topCountryByGrowth(leads, startDate, endDate, dateField),
       lastMonth: calcLastMonthStats(leads),
       byStatus: statusGroups,
+      byStage: stageGroups,
       byCounselor: counselorGroups,
       byDestination: destinationGroups,
       bySource: sourceGroups,
       byFinanceState: financeGroups,
+      byEligibility: eligibilityGroups,
       byCounselorDetails: buildDetails(filtered, "counselor", "Not assigned yet"),
       byDestinationDetails: buildDetails(filtered, "destination", "Unknown"),
       agentLeaderboard: buildAgentLeaderboard(leads, startDate, endDate, dateField),
@@ -954,9 +1064,10 @@ router.get("/stats", async (req, res) => {
         granularity
       ),
       leadsOverTimeByCounselor: leadsOverTimeByCounselor(
-        filtered,
-        dateField,
-        granularity
+        leads,
+        granularity,
+        startDate,
+        endDate
       ),
       leadsOverTimePerformance: leadsOverTimePerformance(
         filtered,

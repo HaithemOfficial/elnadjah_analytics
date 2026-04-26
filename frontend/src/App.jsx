@@ -232,14 +232,62 @@ const endOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.ge
 const dayKey = (date) => toLocalDateString(date);
 const monthKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 
+const startOfAlgeriaWeek = (date = new Date()) => {
+  const day = date.getDay(); // 0 Sunday ... 6 Saturday
+  const sinceSaturday = (day + 1) % 7;
+  const start = startOfDay(date);
+  start.setDate(start.getDate() - sinceSaturday);
+  return start;
+};
+
+const endOfAlgeriaWeek = (date = new Date()) => {
+  const start = startOfAlgeriaWeek(date);
+  return endOfDay(new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6));
+};
+
+// Returns the last COMPLETED Algeria week (Sat→Fri).
+// On Friday the current week ends today, so it is returned.
+// On any other day the previous Saturday→Friday is returned.
+const getLastCompletedAlgeriaWeek = (now = new Date()) => {
+  const day = now.getDay(); // 0=Sun ... 5=Fri, 6=Sat
+  const daysSinceFriday = (day - 5 + 7) % 7; // 0 on Fri, 1 on Sat, 2 on Sun …
+  const lastFriday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysSinceFriday);
+  return {
+    weekStart: startOfDay(new Date(lastFriday.getFullYear(), lastFriday.getMonth(), lastFriday.getDate() - 6)),
+    weekEnd: endOfDay(lastFriday),
+  };
+};
+
 const getLeadDate = (lead, dateField) => {
   if (dateField === "lastStateUpdate") return lead.lastStateUpdate || null;
   if (dateField === "timestamp") return lead.timestamp || null;
   return lead.timestamp || lead.lastStateUpdate || null;
 };
 
-const getContactDate = (lead) => lead.firstContact || null;
+const getContactDate = (lead) => lead.lastStateUpdate || null;
 const hasAssignedAgent = (lead) => Boolean(String(lead?.counselor || "").trim());
+const hasContactedLead = (lead) => Boolean(getContactDate(lead));
+
+const normalizeText = (value) => normalize(String(value || "")).replace(/\s+/g, " ").trim();
+
+function evaluateDestinationEligibility(lead) {
+  const destination = normalizeText(lead?.destination);
+  const bac = normalizeText(lead?.bac);
+  const budget = normalizeText(lead?.budget);
+
+  const isLithuania = destination.includes("ليتوانيا");
+  if (!isLithuania) {
+    return { applicable: false, eligible: null };
+  }
+
+  const hasInvalidBac = bac.includes("بدون bac") || bac.includes("without bac");
+  const hasLowBudget = budget.includes("أقل من 100 مليون");
+
+  return {
+    applicable: true,
+    eligible: !(hasInvalidBac || hasLowBudget),
+  };
+}
 
 function inRange(date, startDate, endDate) {
   if (!date) return false;
@@ -323,6 +371,20 @@ function leadsOverTimeByDimension(leads, dateField, granularity, keyName) {
   return Object.values(buckets).sort((a, b) => a.date.localeCompare(b.date));
 }
 
+function contactedOverTimeByCounselor(leads, granularity, startDate, endDate) {
+  const buckets = {};
+  leads.forEach((lead) => {
+    if (!hasAssignedAgent(lead)) return;
+    const contactDate = getContactDate(lead);
+    if (!contactDate || !inRange(contactDate, startDate, endDate)) return;
+    const key = granularity === "month" ? monthKey(contactDate) : dayKey(contactDate);
+    const counselor = lead.counselor;
+    if (!buckets[key]) buckets[key] = { date: key };
+    buckets[key][counselor] = (buckets[key][counselor] || 0) + 1;
+  });
+  return Object.values(buckets).sort((a, b) => a.date.localeCompare(b.date));
+}
+
 function leadsOverTimePerformance(leads, dateField, granularity, startDate, endDate) {
   const totals = {};
   const contacted = {};
@@ -331,8 +393,10 @@ function leadsOverTimePerformance(leads, dateField, granularity, startDate, endD
     if (leadDate && inRange(leadDate, startDate, endDate)) {
       const key = granularity === "month" ? monthKey(leadDate) : dayKey(leadDate);
       totals[key] = (totals[key] || 0) + 1;
-      if (hasAssignedAgent(lead)) {
-        contacted[key] = (contacted[key] || 0) + 1;
+      const contactDate = getContactDate(lead);
+      if (contactDate && inRange(contactDate, startDate, endDate)) {
+        const contactKey = granularity === "month" ? monthKey(contactDate) : dayKey(contactDate);
+        contacted[contactKey] = (contacted[contactKey] || 0) + 1;
       }
     }
   });
@@ -377,7 +441,7 @@ function countStatusInRange(leads, startDate, endDate, dateField) {
   };
   filtered.forEach((lead) => {
     const category = normalizeStatusCategory(lead.status);
-    if (!lead.counselor) counts.notContacted += 1;
+    if (!hasContactedLead(lead)) counts.notContacted += 1;
     if (category === "Interested / Will apply") counts.interested += 1;
     if (category === "Follow-Up / No Reply") counts.followUp += 1;
     if (category === "Needs More Info / Thinking") counts.needsMoreInfo += 1;
@@ -488,9 +552,9 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
 
   leads.forEach((lead) => {
     if (!hasAssignedAgent(lead)) return;
-    const leadDate = getLeadDate(lead, dateField);
-    if (!leadDate) return;
-    if (!inRange(leadDate, startDate, endDate)) return;
+    const contactDate = getContactDate(lead);
+    if (!contactDate) return;
+    if (!inRange(contactDate, startDate, endDate)) return;
 
     if (!current.has(lead.counselor)) current.set(lead.counselor, initRow());
     const row = current.get(lead.counselor);
@@ -499,7 +563,6 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
     const destination = lead.destination || "Unknown";
     row.destinationCounts[destination] = (row.destinationCounts[destination] || 0) + 1;
 
-    const contactDate = getContactDate(lead);
     if (lead.timestamp && contactDate) {
       const days = diffDaysInclusive(startOfDay(lead.timestamp), startOfDay(contactDate)) - 1;
       if (days >= 0) {
@@ -516,14 +579,14 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
   if (previousStart && previousEnd) {
     leads.forEach((lead) => {
       if (!hasAssignedAgent(lead)) return;
-      const leadDate = getLeadDate(lead, dateField);
-      if (!inRange(leadDate, previousStart, previousEnd)) return;
+      const contactDate = getContactDate(lead);
+      if (!contactDate) return;
+      if (!inRange(contactDate, previousStart, previousEnd)) return;
 
       if (!previous.has(lead.counselor)) previous.set(lead.counselor, initRow());
       const row = previous.get(lead.counselor);
       row.contacted += 1;
       if (normalizeStatusCategory(lead.status) === "Interested / Will apply") row.interested += 1;
-      const contactDate = getContactDate(lead);
       if (lead.timestamp && contactDate) {
         const days = diffDaysInclusive(startOfDay(lead.timestamp), startOfDay(contactDate)) - 1;
         if (days >= 0) {
@@ -573,9 +636,13 @@ function buildStatsFromLeads(leads, filters) {
   const startDate = filters.allTime || !filters.startDate ? null : startOfDay(new Date(filters.startDate));
   const endDate = filters.allTime || !filters.endDate ? null : endOfDay(new Date(filters.endDate));
 
-  const filtered = leads.filter((lead) => {
+  const scopedLeads = leads.filter((lead) => {
     if (filters.counselor && lead.counselor !== filters.counselor) return false;
     if (filters.destination && lead.destination !== filters.destination) return false;
+    return true;
+  });
+
+  const filtered = scopedLeads.filter((lead) => {
     return inRange(getLeadDate(lead, dateField), startDate, endDate);
   });
 
@@ -592,12 +659,23 @@ function buildStatsFromLeads(leads, filters) {
 
   const totals = countStatusInRange(filtered, null, null, dateField);
   const byStatus = groupStatusCategories(filtered);
+  const byStage = groupCount(filtered, "status", "No stage");
   const byCounselor = groupCount(filtered, "counselor", "Not assigned yet");
   const byDestination = groupCount(filtered, "destination");
   const bySource = groupCount(filtered, "source");
   const byFinanceState = groupCount(filtered, "bac");
+  const byEligibility = groupCount(filtered, "eligibility", "Unknown");
 
-  const contactedCount = filtered.filter(hasAssignedAgent).length;
+  const eligibleCount = filtered.filter((lead) => {
+    const value = normalize(lead.eligibility);
+    return value.includes("eligible") && !value.includes("not");
+  }).length;
+  const notEligibleCount = filtered.filter((lead) => {
+    const value = normalize(lead.eligibility);
+    return value.includes("not eligible");
+  }).length;
+
+  const contactedCount = filtered.filter(hasContactedLead).length;
   const responseRate = filtered.length ? Math.trunc((contactedCount / filtered.length) * 100) : 0;
 
   let speedTotal = 0;
@@ -635,20 +713,26 @@ function buildStatsFromLeads(leads, filters) {
       endDate: toLocalDateString(effectiveEnd),
     },
     avgPerDay: Number((filtered.length / rangeDays).toFixed(2)),
-    totals,
+    totals: {
+      ...totals,
+      eligible: eligibleCount,
+      notEligible: notEligibleCount,
+    },
     responseRate,
     responseSpeedDays: speedCount ? Math.trunc(speedTotal / speedCount) : 0,
     comparison: calcPeriodComparison(leads, startDate, endDate, dateField),
     topCountryGrowth: topCountryByGrowth(leads, startDate, endDate, dateField),
     byStatus,
+    byStage,
     byCounselor,
     byDestination,
     bySource,
     byFinanceState,
+    byEligibility,
     byCounselorDetails: buildDetails(filtered, "counselor", "Not assigned yet"),
     byDestinationDetails: buildDetails(filtered, "destination", "Unknown"),
-    agentLeaderboard: buildAgentLeaderboard(filtered, startDate, endDate, dateField),
-    allAgents: uniqueAgents(leads),
+    agentLeaderboard: buildAgentLeaderboard(scopedLeads, startDate, endDate, dateField),
+    allAgents: uniqueAgents(scopedLeads),
     timeGranularity: granularity,
     leadsOverTime: leadsSeries,
     leadsOverTimeInterested,
@@ -660,11 +744,11 @@ function buildStatsFromLeads(leads, filters) {
       granularity,
       "source"
     ),
-    leadsOverTimeByCounselor: leadsOverTimeByDimension(
-      filtered.filter(hasAssignedAgent),
-      dateField,
+    leadsOverTimeByCounselor: contactedOverTimeByCounselor(
+      scopedLeads,
       granularity,
-      "counselor"
+      startDate,
+      endDate
     ),
     leadsOverTimePerformance: leadsOverTimePerformanceSeries,
     overallPerformance: buildOverallPerformance(leadsOverTimePerformanceSeries),
@@ -739,6 +823,7 @@ export default function App() {
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const activePage = "overview";
   const [activeOverviewGroup, setActiveOverviewGroup] = useState("general");
+  const [alertsPanelCollapsed, setAlertsPanelCollapsed] = useState(false);
 
   const logout = async () => {
     try {
@@ -997,7 +1082,7 @@ export default function App() {
       ? { key: "date", label: `Date: ${filters.startDate || "-"} to ${filters.endDate || "-"}` }
       : null,
     filters.counselor ? { key: "counselor", label: `Agent: ${filters.counselor}` } : null,
-    filters.destination ? { key: "destination", label: `Country: ${filters.destination}` } : null,
+    filters.destination ? { key: "destination", label: `Destination: ${filters.destination}` } : null,
   ].filter(Boolean);
 
   const clearFilterChip = (key) => {
@@ -1049,12 +1134,6 @@ export default function App() {
   const countryDetails = stats?.byDestinationDetails ?? [];
   const agentLeaderboard = stats?.agentLeaderboard ?? [];
   const allAgents = stats?.allAgents ?? [];
-  const activeAgentNames = agentDetails
-    .map((row) => row.name)
-    .filter((name) => name && name !== "Not assigned yet");
-  const inactiveAgents = allAgents.filter(
-    (name) => name && !activeAgentNames.includes(name)
-  );
   const leaderboardRows = useMemo(() => {
     const rows = agentLeaderboard
       .filter((row) => row.name !== "Not assigned yet")
@@ -1066,6 +1145,10 @@ export default function App() {
       badge: index === 0 ? "🥇" : index === 1 ? "🥈" : index === 2 ? "🥉" : "",
     }));
   }, [agentLeaderboard]);
+  const activeAgentNames = leaderboardRows.map((row) => row.name).filter(Boolean);
+  const inactiveAgents = allAgents.filter(
+    (name) => name && !activeAgentNames.includes(name)
+  );
 
   const totalLeads = stats?.totals?.total ?? 0;
   const pct = (value) =>
@@ -1082,7 +1165,20 @@ export default function App() {
 
   const topSource = topByValue(stats?.bySource);
   const topCountryGrowth = stats?.topCountryGrowth;
-  const topAgent = topByValueExcluding(stats?.byCounselor, "Not assigned yet");
+  const topAgent = leaderboardRows[0] || null;
+  const topDestinationDelta = topCountryGrowth
+    ? (Number(topCountryGrowth.current) || 0) - (Number(topCountryGrowth.previous) || 0)
+    : 0;
+  const eligibleFromBuckets = (stats?.byEligibility || []).reduce((sum, item) => {
+    const label = normalize(item?.name);
+    if ((label.includes("✅") || label.includes("eligible")) && !label.includes("not eligible")) {
+      return sum + (Number(item?.value) || 0);
+    }
+    return sum;
+  }, 0);
+  const eligibleCount = Number(stats?.totals?.eligible ?? eligibleFromBuckets);
+  const notEligibleCount = Number(stats?.totals?.notEligible ?? 0);
+  const eligibilityRate = totalLeads ? ((eligibleCount / totalLeads) * 100).toFixed(1) : "0.0";
 
   const potentialSeries = useMemo(() => {
     const leadsSeries = stats?.leadsOverTime ?? [];
@@ -1100,13 +1196,9 @@ export default function App() {
     });
   }, [stats]);
   const notContactedCount = stats?.totals?.notContacted ?? 0;
-  const assignedCount =
-    stats?.byCounselor?.reduce(
-      (sum, item) => (item.name === "Not assigned yet" ? sum : sum + (item.value || 0)),
-      0
-    ) ?? 0;
-  const topAgentShare = topAgent?.value
-    ? `${rateOf(topAgent.value)}%`
+  const assignedCount = Math.max(totalLeads - notContactedCount, 0);
+  const topAgentShare = topAgent?.contacted
+    ? `${rateOf(topAgent.contacted)}%`
     : "0.0%";
   const responseRateHelper = stats?.responseRate
     ? `${stats.responseRate}% of leads contacted`
@@ -1133,6 +1225,43 @@ export default function App() {
       )
     : 0;
 
+  const previousPeriodTeamMetrics = useMemo(() => {
+    if (!stats?.range?.startDate || !stats?.range?.endDate) {
+      return { contacted: 0, interested: 0, avgPerDay: 0 };
+    }
+
+    const currentStart = startOfDay(new Date(stats.range.startDate));
+    const currentEnd = endOfDay(new Date(stats.range.endDate));
+    const days = diffDaysInclusive(currentStart, currentEnd);
+    const previousEnd = endOfDay(new Date(currentStart.getTime() - 86400000));
+    const previousStart = startOfDay(
+      new Date(startOfDay(previousEnd).getTime() - (days - 1) * 86400000)
+    );
+
+    let contacted = 0;
+    let interested = 0;
+
+    allLeads.forEach((lead) => {
+      if (filters.counselor && lead.counselor !== filters.counselor) return;
+      if (filters.destination && lead.destination !== filters.destination) return;
+      if (!hasAssignedAgent(lead)) return;
+
+      const contactDate = getContactDate(lead);
+      if (!inRange(contactDate, previousStart, previousEnd)) return;
+
+      contacted += 1;
+      if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
+        interested += 1;
+      }
+    });
+
+    return {
+      contacted,
+      interested,
+      avgPerDay: days ? Number((contacted / days).toFixed(1)) : 0,
+    };
+  }, [allLeads, filters.counselor, filters.destination, stats?.range?.startDate, stats?.range?.endDate]);
+
   const prevAvgPerDay = rangeDays
     ? Number((stats?.comparison?.totals?.previous / rangeDays).toFixed(2))
     : 0;
@@ -1152,6 +1281,23 @@ export default function App() {
   const teamInterestedRate = totalTeamContacted
     ? ((totalTeamInterested / totalTeamContacted) * 100).toFixed(1)
     : "0.0";
+  const teamAvgContactedPerDay = rangeDays
+    ? (totalTeamContacted / rangeDays).toFixed(1)
+    : "0.0";
+  const prevTeamAvgContactedPerDay = previousPeriodTeamMetrics.avgPerDay;
+  const teamAvgContactedPerDayChange = calcPctChange(
+    Number(teamAvgContactedPerDay),
+    prevTeamAvgContactedPerDay
+  );
+  const teamAvgContactedComparisonHelper = rangeDays
+    ? `${formatPct(teamAvgContactedPerDayChange)} vs previous period (${prevTeamAvgContactedPerDay}/day)`
+    : "";
+  const teamAvgContactedComparisonTone =
+    teamAvgContactedPerDayChange > 0
+      ? "positive"
+      : teamAvgContactedPerDayChange < 0
+      ? "negative"
+      : null;
   const avgTeamResponseDaysRaw = leaderboardRows
     .filter((row) => row.avgResponseDays !== null && row.avgResponseDays !== undefined)
     .reduce((sum, row, _, arr) => sum + row.avgResponseDays / arr.length, 0);
@@ -1228,17 +1374,33 @@ export default function App() {
           acc[destinationName] = {
             name: destinationName,
             total: 0,
-            assigned: 0,
+            contacted: 0,
             interested: 0,
+            eligibilityConfigured: false,
+            eligibilityBase: 0,
+            eligible: 0,
+            notEligible: 0,
           };
         }
 
         acc[destinationName].total += 1;
-        if (hasAssignedAgent(lead)) {
-          acc[destinationName].assigned += 1;
+        const contactDate = getContactDate(lead);
+        if (contactDate && inRange(contactDate, startDate, endDate)) {
+          acc[destinationName].contacted += 1;
         }
         if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
           acc[destinationName].interested += 1;
+        }
+
+        const eligibility = evaluateDestinationEligibility(lead);
+        if (eligibility.applicable) {
+          acc[destinationName].eligibilityConfigured = true;
+          acc[destinationName].eligibilityBase += 1;
+          if (eligibility.eligible) {
+            acc[destinationName].eligible += 1;
+          } else {
+            acc[destinationName].notEligible += 1;
+          }
         }
 
         return acc;
@@ -1247,7 +1409,11 @@ export default function App() {
     return Object.values(rows)
       .map((row) => ({
         ...row,
-        notContacted: Math.max(row.total - row.assigned, 0),
+        notContacted: Math.max(row.total - row.contacted, 0),
+        eligibilityRate:
+          row.eligibilityConfigured && row.eligibilityBase > 0
+            ? Number(((row.eligible / row.eligibilityBase) * 100).toFixed(1))
+            : null,
       }))
       .sort((a, b) => b.total - a.total);
   }, [allLeads, filters]);
@@ -1309,6 +1475,327 @@ export default function App() {
     : "0.0";
   const leadGenGrowthCurrent = Number(stats?.comparison?.totals?.pctChange ?? 0);
   const topSourceTrendKeys = topSourceRows.slice(0, 4).map((row) => row.name);
+
+  const managerScopedLeads = useMemo(() => {
+    const startDate =
+      filters.allTime || !filters.startDate
+        ? null
+        : startOfDay(new Date(filters.startDate));
+    const endDate =
+      filters.allTime || !filters.endDate
+        ? null
+        : endOfDay(new Date(filters.endDate));
+
+    return allLeads.filter((lead) => {
+      if (filters.counselor && lead.counselor !== filters.counselor) return false;
+      if (filters.destination && lead.destination !== filters.destination) return false;
+      return inRange(getContactDate(lead), startDate, endDate);
+    });
+  }, [allLeads, filters]);
+
+  const managerAgentRows = useMemo(() => {
+    const SLA_HOURS = 24;
+    const STALE_DAYS = 3;
+    const now = Date.now();
+    const rows = new Map();
+
+    managerScopedLeads.forEach((lead) => {
+      const agent = String(lead.counselor || "").trim();
+      if (!agent) return;
+      const touchDate = getContactDate(lead);
+      if (!touchDate) return;
+
+      if (!rows.has(agent)) {
+        rows.set(agent, {
+          name: agent,
+          assigned: 0,
+          interested: 0,
+          notInterested: 0,
+          followUp: 0,
+          delayHoursSum: 0,
+          delayCount: 0,
+          withinSla: 0,
+          untouched: 0,
+          stalled: 0,
+        });
+      }
+
+      const row = rows.get(agent);
+      row.assigned += 1;
+
+      const statusCat = normalizeStatusCategory(lead.status);
+      if (statusCat === "Interested / Will apply") row.interested += 1;
+      if (statusCat === "Not Interested / Disqualified") row.notInterested += 1;
+      if (statusCat === "Follow-Up / No Reply") row.followUp += 1;
+
+      const leadDate = lead.timestamp || null;
+      if (leadDate) {
+        const delayHours = (touchDate.getTime() - leadDate.getTime()) / 3600000;
+        if (delayHours >= 0) {
+          row.delayHoursSum += delayHours;
+          row.delayCount += 1;
+          if (delayHours <= SLA_HOURS) row.withinSla += 1;
+        }
+      }
+
+      const lastActivityDate = lead.lastStateUpdate || touchDate || leadDate;
+      if (statusCat === "Follow-Up / No Reply" && lastActivityDate) {
+        const staleDays = (now - lastActivityDate.getTime()) / 86400000;
+        if (staleDays > STALE_DAYS) row.stalled += 1;
+      }
+    });
+
+    return Array.from(rows.values())
+      .map((row) => {
+        const avgDelayHours = row.delayCount ? row.delayHoursSum / row.delayCount : 0;
+        const slaRate = row.delayCount ? (row.withinSla / row.delayCount) * 100 : 0;
+        const conversionRate = row.assigned ? (row.interested / row.assigned) * 100 : 0;
+        const notInterestedRate = row.assigned ? (row.notInterested / row.assigned) * 100 : 0;
+        const untouchedRate = row.assigned ? (row.untouched / row.assigned) * 100 : 0;
+        const stalledRate = row.assigned ? (row.stalled / row.assigned) * 100 : 0;
+        const riskScore = Math.round(
+          (100 - slaRate) * 0.45 + stalledRate * 0.35 + untouchedRate * 0.2 + avgDelayHours * 0.4
+        );
+
+        return {
+          ...row,
+          avgDelayHours,
+          slaRate,
+          conversionRate,
+          notInterestedRate,
+          untouchedRate,
+          stalledRate,
+          riskScore,
+        };
+      })
+      .sort((a, b) => b.assigned - a.assigned);
+  }, [managerScopedLeads]);
+
+  const managerTotals = managerAgentRows.reduce(
+    (acc, row) => {
+      acc.assigned += row.assigned;
+      acc.interested += row.interested;
+      acc.notInterested += row.notInterested;
+      acc.followUp += row.followUp;
+      acc.delayHoursSum += row.delayHoursSum;
+      acc.delayCount += row.delayCount;
+      acc.withinSla += row.withinSla;
+      acc.untouched += row.untouched;
+      acc.stalled += row.stalled;
+      return acc;
+    },
+    {
+      assigned: 0,
+      interested: 0,
+      notInterested: 0,
+      followUp: 0,
+      delayHoursSum: 0,
+      delayCount: 0,
+      withinSla: 0,
+      untouched: 0,
+      stalled: 0,
+    }
+  );
+
+  const managerConversionRate = managerTotals.assigned
+    ? ((managerTotals.interested / managerTotals.assigned) * 100).toFixed(1)
+    : "0.0";
+  const managerActiveAgents = managerAgentRows.length;
+  const managerInactiveAgents = inactiveAgents.length;
+  const managerContactedLeads = managerTotals.assigned;
+  const managerInterestedLeads = managerTotals.interested;
+  const managerInterestedFromContactedRate = managerContactedLeads
+    ? ((managerInterestedLeads / managerContactedLeads) * 100).toFixed(1)
+    : "0.0";
+  const contactedLeadsChange = calcPctChange(
+    managerContactedLeads,
+    previousPeriodTeamMetrics.contacted
+  );
+  const contactedLeadsComparisonHelper = rangeDays
+    ? `${formatPct(contactedLeadsChange)} vs previous period (${formatNumber(previousPeriodTeamMetrics.contacted)})`
+    : "";
+  const contactedLeadsComparisonTone =
+    contactedLeadsChange > 0
+      ? "positive"
+      : contactedLeadsChange < 0
+      ? "negative"
+      : null;
+  const interestedLeadsChange = calcPctChange(
+    managerInterestedLeads,
+    previousPeriodTeamMetrics.interested
+  );
+  const interestedLeadsComparisonHelper = rangeDays
+    ? `${formatPct(interestedLeadsChange)} vs previous period (${formatNumber(previousPeriodTeamMetrics.interested)})`
+    : "";
+  const interestedLeadsComparisonTone =
+    interestedLeadsChange > 0
+      ? "positive"
+      : interestedLeadsChange < 0
+      ? "negative"
+      : null;
+  const managerAvgContactedPerAgent = managerActiveAgents
+    ? (managerContactedLeads / managerActiveAgents).toFixed(1)
+    : "0.0";
+  const managerTotalUntouched = managerTotals.untouched;
+  const managerTotalStalled = managerTotals.stalled;
+  const managerNotInterestedRate = managerTotals.assigned
+    ? ((managerTotals.notInterested / managerTotals.assigned) * 100).toFixed(1)
+    : "0.0";
+
+  // Most recent lastStateUpdate per agent across all leads (not filtered)
+  const agentLastActivity = useMemo(() => {
+    const map = new Map();
+    allLeads.forEach((lead) => {
+      const agent = String(lead.counselor || "").trim();
+      if (!agent || !lead.lastStateUpdate) return;
+      const current = map.get(agent);
+      if (!current || lead.lastStateUpdate > current) map.set(agent, lead.lastStateUpdate);
+    });
+    return map;
+  }, [allLeads]);
+
+  const agentStatsMap = useMemo(
+    () => new Map(managerAgentRows.map((r) => [r.name, r])),
+    [managerAgentRows]
+  );
+
+  const teamPipelineData = managerAgentRows.slice(0, 8).map((row) => ({
+    name: row.name,
+    Interested: row.interested,
+    "Follow-up": row.followUp,
+    "Not interested": row.notInterested,
+    Untouched: row.untouched,
+  }));
+
+  const managerContactedVsInterestedData = [...managerAgentRows]
+    .slice(0, 8)
+    .map((row) => ({
+      name: row.name,
+      contacted: row.assigned,
+      interested: row.interested,
+    }));
+
+  const managerEffortData = [...managerAgentRows]
+    .slice(0, 8)
+    .map((row) => ({
+      name: row.name,
+      contacted: row.assigned,
+      avgDelayHours: Number(row.avgDelayHours.toFixed(1)),
+    }));
+
+  const managerTableRows = useMemo(() => {
+    const activeMap = new Map(managerAgentRows.map((row) => [row.name, row]));
+    return allAgents
+      .map((name) => {
+        const row = activeMap.get(name);
+        return {
+          name,
+          contacted: row ? row.assigned : 0,
+          interested: row ? row.interested : 0,
+          notInterested: row ? row.notInterested : 0,
+          notInterestedRate: row ? row.notInterestedRate : 0,
+          untouched: row ? row.untouched : 0,
+          stalled: row ? row.stalled : 0,
+          avgDelayHours: row ? row.avgDelayHours : 0,
+          interestedRate: row ? row.conversionRate : 0,
+          lastActivity: agentLastActivity.get(name) || null,
+          status: row && row.assigned > 0 ? "Active" : "Inactive",
+        };
+      })
+      .sort((a, b) => {
+        if (a.status !== b.status) return a.status === "Active" ? -1 : 1;
+        return b.contacted - a.contacted;
+      });
+  }, [allAgents, managerAgentRows, agentLastActivity]);
+
+  const managerWeeklyAlerts = useMemo(() => {
+    const now = new Date();
+    const { weekStart, weekEnd } = getLastCompletedAlgeriaWeek(now);
+    const yesterday = startOfDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+
+    const allAgentNames = Array.from(
+      new Set([
+        ...allAgents,
+        ...allLeads.map((lead) => String(lead?.counselor || "").trim()).filter(Boolean),
+      ])
+    );
+
+    return allAgentNames
+      .map((agentName) => {
+        const agentLeads = allLeads.filter(
+          (lead) => String(lead?.counselor || "").trim() === agentName
+        );
+
+        // All-time activity days from column V (lastStateUpdate) only.
+        // Used for the consecutive-inactive rolling check.
+        const allActivityDays = new Set(
+          agentLeads
+            .map((lead) => lead.lastStateUpdate)
+            .filter(Boolean)
+            .map((date) => toLocalDateString(date))
+        );
+
+        // Don't flag agents who have no lastStateUpdate data at all —
+        // column V may not be filled yet and they would appear falsely inactive.
+        if (allActivityDays.size === 0) return null;
+
+        // Leads the agent touched during the last completed week (col V date in window)
+        const touchedInWeek = agentLeads.filter((lead) => {
+          const d = lead.lastStateUpdate;
+          return d && d >= weekStart && d <= weekEnd;
+        });
+
+        const contactedWeek = touchedInWeek.length;
+        const interestedWeek = touchedInWeek.filter(
+          (lead) => normalizeStatusCategory(lead.status) === "Interested / Will apply"
+        ).length;
+        const interestedRateWeek = contactedWeek ? (interestedWeek / contactedWeek) * 100 : 0;
+
+        const activeDaysInWeek = new Set(
+          touchedInWeek.map((lead) => toLocalDateString(lead.lastStateUpdate))
+        ).size;
+        const inactiveDaysInWeek = Math.max(7 - activeDaysInWeek, 0);
+
+        // Rolling consecutive inactive days (looking back from yesterday, max 21)
+        let consecutiveInactive = 0;
+        const cursor = new Date(yesterday);
+        for (let i = 0; i < 21; i += 1) {
+          const key = toLocalDateString(cursor);
+          if (allActivityDays.has(key)) break;
+          consecutiveInactive += 1;
+          cursor.setDate(cursor.getDate() - 1);
+        }
+
+        const reasons = [];
+        if (consecutiveInactive >= 2) {
+          reasons.push(`Inactive for ${consecutiveInactive} full days in a row`);
+        }
+        if (inactiveDaysInWeek >= 3) {
+          reasons.push(`Worked only ${activeDaysInWeek} day${activeDaysInWeek !== 1 ? "s" : ""} last week (minimum 4 required)`);
+        }
+        if (contactedWeek < 50) {
+          reasons.push(`Contacted only ${contactedWeek} leads last week (minimum 50)`);
+        }
+        if (contactedWeek > 0 && interestedRateWeek < 10) {
+          reasons.push(`Interested rate ${interestedRateWeek.toFixed(1)}% last week (minimum 10%)`);
+        }
+
+        return {
+          agentName,
+          contactedWeek,
+          interestedWeek,
+          interestedRateWeek: Number(interestedRateWeek.toFixed(1)),
+          activeDaysInWeek,
+          inactiveDaysInWeek,
+          consecutiveInactive,
+          reasons,
+          hasAlert: reasons.length > 0,
+          weekLabel: `${toLocalDateString(weekStart)} → ${toLocalDateString(weekEnd)}`,
+        };
+      })
+      .filter((row) => row && row.hasAlert)
+      .sort((a, b) => b.reasons.length - a.reasons.length || a.agentName.localeCompare(b.agentName));
+  }, [allAgents, allLeads]);
 
   if (!authToken) {
     return (
@@ -1384,13 +1871,51 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+        {managerWeeklyAlerts.length > 0 && (
+          <div className="rounded-2xl border border-rose-700/60 bg-rose-950/30 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center justify-center rounded-full bg-rose-600 text-white text-[11px] font-bold px-2 py-0.5 leading-none">
+                  {managerWeeklyAlerts.length}
+                </span>
+                <h3 className="text-sm font-semibold text-rose-200">
+                  Red alert{managerWeeklyAlerts.length > 1 ? "s" : ""} this week — {managerWeeklyAlerts.length} agent{managerWeeklyAlerts.length > 1 ? "s" : ""} need{managerWeeklyAlerts.length === 1 ? "s" : ""} attention
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAlertsPanelCollapsed((prev) => !prev)}
+                className="shrink-0 text-xs text-rose-300 hover:text-rose-100 underline"
+              >
+                {alertsPanelCollapsed ? "Show details" : "Hide"}
+              </button>
+            </div>
+            {!alertsPanelCollapsed && (
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                {managerWeeklyAlerts.map((alert) => (
+                  <div key={`global-alert-${alert.agentName}`} className="rounded-lg border border-rose-800/60 bg-rose-950/40 p-3">
+                    <p className="text-sm font-semibold text-rose-100">{alert.agentName}</p>
+                    <p className="text-[11px] text-rose-400 mb-1.5">{alert.weekLabel}</p>
+                    <ul className="text-xs text-rose-200 space-y-0.5 list-disc list-inside">
+                      {alert.reasons.map((reason) => (
+                        <li key={`global-${alert.agentName}-${reason}`}>{reason}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Move tab navigation above filter section */}
         <div className="relative rounded-2xl border border-slate-800 bg-slate-950 p-1 mb-8 mt-2">
           <div className="no-scrollbar flex w-full items-center gap-2 overflow-x-auto py-2 px-1 sm:px-2 md:flex-wrap md:overflow-visible">
-            {[ 
+            {[
               { key: "general", label: "General KPIs" },
               { key: "team", label: "Team Performance KPIs" },
               { key: "destinations", label: "Destinations KPIs" },
+              { key: "manager", label: "Manager dashboard" },
             ].map((group) => (
               <button
                 key={group.key}
@@ -1403,7 +1928,16 @@ export default function App() {
                 }`}
                 style={{ minWidth: 84 }}
               >
-                {group.label}
+                {group.key === "manager" && managerWeeklyAlerts.length > 0 ? (
+                  <span className="flex items-center gap-1.5">
+                    {group.label}
+                    <span className="inline-flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold px-1.5 py-0.5 leading-none">
+                      {managerWeeklyAlerts.length}
+                    </span>
+                  </span>
+                ) : (
+                  group.label
+                )}
               </button>
             ))}
           </div>
@@ -1496,7 +2030,7 @@ export default function App() {
             </div>
 
             <div className="flex flex-col text-xs min-w-[170px]">
-              <label className="text-slate-400">Country</label>
+              <label className="text-slate-400">Destination</label>
               <select
                 className="mt-1 rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 text-slate-100"
                 value={draftFilters.destination}
@@ -1504,7 +2038,7 @@ export default function App() {
                   setDraftFilters((prev) => ({ ...prev, destination: event.target.value }))
                 }
               >
-                <option value="">All countries</option>
+                <option value="">All destinations</option>
                 {destinationOptions.map((destination) => (
                   <option key={destination} value={destination}>
                     {destination}
@@ -1710,7 +2244,7 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-col text-xs">
-                  <label className="text-slate-400">Country</label>
+                  <label className="text-slate-400">Destination</label>
                   <select
                     className="mt-1 rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 text-slate-100"
                     value={draftFilters.destination}
@@ -1718,7 +2252,7 @@ export default function App() {
                       setDraftFilters((prev) => ({ ...prev, destination: event.target.value }))
                     }
                   >
-                    <option value="">All countries</option>
+                    <option value="">All destinations</option>
                     {destinationOptions.map((destination) => (
                       <option key={destination} value={destination}>
                         {destination}
@@ -1811,7 +2345,7 @@ export default function App() {
                           }
                         />
                         <StatCard
-                          title="Total interested"
+                          title="Interested stage"
                           value={formatNumber(stats?.totals?.interested ?? 0)}
                           helper={interestedComparisonHelper}
                           helperTone={
@@ -1823,29 +2357,27 @@ export default function App() {
                         <StatCard
                           title="Contacted rate"
                           value={`${rateOf(assignedCount)}%`}
-                          helper={null}
+                          helper={`Contacted: ${formatNumber(assignedCount)} · Not contacted: ${formatNumber(notContactedCount)}`}
                           helperTone={null}
-                          // ...existing code...
-                        >
-                          <span className="block text-xs text-slate-400 mt-2">Contacted: {formatNumber(assignedCount)} · Not contacted: {formatNumber(notContactedCount)}</span>
-                        </StatCard>
+                        />
                         <StatCard
-                          title="Top source"
-                          value={topSource?.name || "-"}
-                          helper={topSource ? `${formatNumber(topSource.value)} leads · ${pct(topSource.value)} of all` : ""}
-                          helperTone={null}
+                          title="Eligibility pass rate"
+                          value={`${eligibilityRate}%`}
+                          helper={`Eligible: ${formatNumber(eligibleCount)} · Not eligible: ${formatNumber(notEligibleCount)}`}
+                          helperTone={Number(eligibilityRate) >= 50 ? "positive" : "negative"}
                         />
                       </div>
                       <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
                         <MiniStat
-                          title="Top source"
-                          value={topSource?.name || "-"}
-                          subtitle={topSource ? `Leads: ${formatNumber(topSource.value)} · Share: ${pct(topSource.value)}` : ""}
+                          title="Avg contacted/day (team)"
+                          value={teamAvgContactedPerDay}
+                          subtitle={`${formatNumber(totalTeamContacted)} contacted over ${formatNumber(rangeDays)} day(s)`}
+                          helper={teamAvgContactedComparisonHelper}
                         />
                         <MiniStat
                           title="Top agent"
                           value={topAgent?.name || "-"}
-                          subtitle={topAgent ? `Leads: ${formatNumber(topAgent.value)} · Share: ${topAgentShare}` : ""}
+                          subtitle={topAgent ? `Leads: ${formatNumber(topAgent.contacted)} · Share: ${topAgentShare}` : ""}
                         />
                         <MiniStat
                           title="Interested rate"
@@ -1853,11 +2385,11 @@ export default function App() {
                           subtitle="Interested out of all leads in selected period"
                         />
                         <MiniStat
-                          title="Top country (new growing)"
+                          title="Fastest-growing destination"
                           value={topCountryGrowth?.name || "-"}
                           subtitle={
                             topCountryGrowth
-                              ? `+${formatNumber(topCountryGrowth.delta)} leads (${formatPct(topCountryGrowth.pctChange)})`
+                              ? `${topDestinationDelta >= 0 ? "+" : ""}${formatNumber(topDestinationDelta)} leads (${formatPct(topCountryGrowth.pctChange)})`
                               : ""
                           }
                         />
@@ -1890,9 +2422,9 @@ export default function App() {
                       </ResponsiveContainer>
                     </ChartCard>
 
-                    <ChartCard title="Leads by status">
+                    <ChartCard title="Leads by stage">
                       <ResponsiveContainer>
-                        <BarChart data={stats?.byStatus ?? []}>
+                        <BarChart data={stats?.byStage ?? []}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
                           <XAxis
                             dataKey="name"
@@ -1911,7 +2443,7 @@ export default function App() {
                           <YAxis allowDecimals={false} stroke="#94a3b8" />
                           <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
                           <Bar dataKey="value" radius={[6, 6, 0, 0]} label={{ position: 'top', fill: '#94a3b8', fontSize: 12 }}>
-                            {(stats?.byStatus ?? []).map((entry, index) => (
+                            {(stats?.byStage ?? []).map((entry, index) => (
                               <Cell
                                 key={`general-status-bar-${entry.name}`}
                                 fill={STATUS_COLORS[index % STATUS_COLORS.length]}
@@ -2115,6 +2647,43 @@ export default function App() {
                   />
                 </div>
 
+                <div className="grid gap-4 md:grid-cols-3">
+                  <StatCard
+                    title="Untouched leads"
+                    value={formatNumber(managerTotalUntouched)}
+                    helper={`${managerTotals.assigned > 0 ? ((managerTotalUntouched / managerTotals.assigned) * 100).toFixed(1) : 0}% of assigned leads never contacted`}
+                    helperTone={managerTotalUntouched > 0 ? "negative" : "positive"}
+                  />
+                  <StatCard
+                    title="Stalled in follow-up"
+                    value={formatNumber(managerTotalStalled)}
+                    helper="Follow-up leads with no activity for 3+ days"
+                    helperTone={managerTotalStalled > 0 ? "negative" : "positive"}
+                  />
+                  <StatCard
+                    title="Not-interested rate"
+                    value={`${managerNotInterestedRate}%`}
+                    helper={`${formatNumber(managerTotals.notInterested)} leads rejected — quality signal`}
+                    helperTone={Number(managerNotInterestedRate) > 40 ? "negative" : Number(managerNotInterestedRate) > 25 ? null : "positive"}
+                  />
+                </div>
+
+                <ChartCard title="Pipeline breakdown by agent (top 8)">
+                  <ResponsiveContainer>
+                    <BarChart data={teamPipelineData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                      <XAxis dataKey="name" stroke="#94a3b8" />
+                      <YAxis allowDecimals={false} stroke="#94a3b8" />
+                      <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                      <Legend />
+                      <Bar dataKey="Interested" stackId="a" fill="#22C55E" radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="Follow-up" stackId="a" fill="#F59E0B" radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="Not interested" stackId="a" fill="#E11D48" radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="Untouched" stackId="a" fill="#64748B" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+
                 <div className="grid gap-6 lg:grid-cols-2">
                   <ChartCard title="Agent output and quality (top 8)">
                     <ResponsiveContainer>
@@ -2203,14 +2772,19 @@ export default function App() {
                           <th className="py-2 pr-4">Agent</th>
                           <th className="py-2 pr-4">Contacted</th>
                           <th className="py-2 pr-4">Interested</th>
-                          <th className="py-2 pr-4">Interested rate</th>
+                          <th className="py-2 pr-4">Interested %</th>
+                          <th className="py-2 pr-4">Not interested %</th>
+                          <th className="py-2 pr-4">Untouched</th>
+                          <th className="py-2 pr-4">Stalled</th>
                           <th className="py-2 pr-4">Avg/day</th>
                           <th className="py-2 pr-4">Avg response</th>
                           <th className="py-2 pr-4">Top destination</th>
                         </tr>
                       </thead>
                       <tbody className="text-slate-100">
-                        {leaderboardRows.slice(0, 12).map((row) => (
+                        {leaderboardRows.slice(0, 12).map((row) => {
+                          const agentStats = agentStatsMap.get(row.name);
+                          return (
                           <tr
                             key={`team-leaderboard-${row.name}`}
                             className={`border-t border-slate-800 ${
@@ -2229,7 +2803,182 @@ export default function App() {
                             <td className="py-2 pr-4">{row.name}</td>
                             <td className="py-2 pr-4">{formatNumber(row.contacted)}</td>
                             <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
-                            <td className="py-2 pr-4">{row.interestedRate}%</td>
+                            <td className="py-2 pr-4 text-emerald-400">{row.interestedRate}%</td>
+                            <td className={`py-2 pr-4 ${agentStats && agentStats.notInterestedRate > 40 ? "text-rose-400" : "text-slate-100"}`}>
+                              {agentStats ? `${agentStats.notInterestedRate.toFixed(1)}%` : "-"}
+                            </td>
+                            <td className={`py-2 pr-4 ${agentStats && agentStats.untouched > 0 ? "text-amber-400" : "text-slate-100"}`}>
+                              {agentStats ? formatNumber(agentStats.untouched) : "-"}
+                            </td>
+                            <td className={`py-2 pr-4 ${agentStats && agentStats.stalled > 0 ? "text-orange-400" : "text-slate-100"}`}>
+                              {agentStats ? formatNumber(agentStats.stalled) : "-"}
+                            </td>
+                            <td className="py-2 pr-4">{row.avgContactedPerDay ?? "-"}</td>
+                            <td className="py-2 pr-4">
+                              {Number.isFinite(row.avgResponseDays)
+                                ? `${row.avgResponseDays}d`
+                                : "-"}
+                            </td>
+                            <td className="py-2 pr-4">{row.topCountry || "-"}</td>
+                          </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </section>
+            )}
+
+            {activeOverviewGroup === "manager" && (
+              <section className="space-y-6">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <StatCard
+                    title="Active agents"
+                    value={formatNumber(managerActiveAgents)}
+                    helper={
+                      managerInactiveAgents > 0
+                        ? `Inactive: ${inactiveAgents.join(", ")}`
+                        : "All agents active"
+                    }
+                    helperTone={managerInactiveAgents > 0 ? "negative" : "positive"}
+                  />
+                  <StatCard
+                    title="Contacted leads"
+                    value={formatNumber(managerContactedLeads)}
+                    subtitle={`${managerAvgContactedPerAgent} contacted per active agent`}
+                    helper={contactedLeadsComparisonHelper}
+                    helperTone={contactedLeadsComparisonTone}
+                  />
+                  <StatCard
+                    title="Interested leads"
+                    value={formatNumber(managerInterestedLeads)}
+                    subtitle={`${managerInterestedFromContactedRate}% from contacted leads`}
+                    helper={interestedLeadsComparisonHelper}
+                    helperTone={interestedLeadsComparisonTone}
+                  />
+                  <StatCard
+                    title="Avg contacted/day (team)"
+                    value={teamAvgContactedPerDay}
+                    subtitle={`${formatNumber(totalTeamContacted)} contacted by ${formatNumber(teamActiveAgents)} active agents`}
+                    helper={teamAvgContactedComparisonHelper}
+                    helperTone={teamAvgContactedComparisonTone}
+                  />
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <ChartCard title="Agent output and quality (top 8)">
+                    <ResponsiveContainer>
+                      <BarChart data={managerContactedVsInterestedData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis dataKey="name" stroke="#94a3b8" />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" />
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                        <Legend />
+                        <Bar dataKey="contacted" name="Contacted" fill="#38BDF8" radius={[6, 6, 0, 0]} />
+                        <Bar dataKey="interested" name="Interested" fill="#22C55E" radius={[6, 6, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+
+                  <ChartCard title="Coverage mix (Contacted/Not contacted)">
+                    <ResponsiveContainer>
+                      <PieChart>
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                        <Legend />
+                        <Pie
+                          data={teamCoverageData}
+                          dataKey="value"
+                          nameKey="name"
+                          innerRadius={55}
+                          outerRadius={90}
+                          paddingAngle={3}
+                        >
+                          {teamCoverageData.map((entry, index) => (
+                            <Cell
+                              key={`manager-coverage-cell-${entry.name}`}
+                              fill={SOURCE_COLORS[index % SOURCE_COLORS.length]}
+                            />
+                          ))}
+                        </Pie>
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <ChartCard title="Interested rate benchmark">
+                    <ResponsiveContainer>
+                      <BarChart data={teamInterestedRateData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis dataKey="name" stroke="#94a3b8" />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" />
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                        <Legend />
+                        <ReferenceLine y={30} stroke="#94a3b8" strokeDasharray="4 4" label="Target 30%" />
+                        <Bar dataKey="interestedRate" fill="#F59E0B" radius={[6, 6, 0, 0]} name="Interested rate %" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+
+                  <ChartCard title="Avg contacted per day by agent">
+                    <ResponsiveContainer>
+                      <BarChart data={teamAvgContactedPerDayData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis dataKey="name" stroke="#94a3b8" />
+                        <YAxis stroke="#94a3b8" />
+                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                        <Legend />
+                        <Bar
+                          dataKey="avgContactedPerDay"
+                          fill="#38BDF8"
+                          radius={[6, 6, 0, 0]}
+                          name="Avg contacted/day"
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+                </div>
+
+                <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
+                  <h3 className="text-base font-semibold text-slate-100 mb-4">
+                    Team leaderboard
+                  </h3>
+                  <div className="overflow-auto">
+                    <table className="min-w-full text-xs">
+                      <thead className="text-slate-400">
+                        <tr className="text-left">
+                          <th className="py-2 pr-4">Rank</th>
+                          <th className="py-2 pr-4">Agent</th>
+                          <th className="py-2 pr-4">Contacted</th>
+                          <th className="py-2 pr-4">Interested</th>
+                          <th className="py-2 pr-4">Interested rate</th>
+                          <th className="py-2 pr-4">Avg/day</th>
+                          <th className="py-2 pr-4">Avg response</th>
+                          <th className="py-2 pr-4">Top destination</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-slate-100">
+                        {leaderboardRows.slice(0, 12).map((row) => (
+                          <tr
+                            key={`manager-leaderboard-${row.name}`}
+                            className={`border-t border-slate-800 ${
+                              row.rank === 1
+                                ? "bg-amber-400/10"
+                                : row.rank === 2
+                                ? "bg-slate-400/10"
+                                : row.rank === 3
+                                ? "bg-amber-700/10"
+                                : ""
+                            }`}
+                          >
+                            <td className="py-2 pr-4 font-medium">
+                              {row.badge} {row.rank}
+                            </td>
+                            <td className="py-2 pr-4">{row.name}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.contacted)}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
+                            <td className="py-2 pr-4 text-emerald-400">{row.interestedRate}%</td>
                             <td className="py-2 pr-4">{row.avgContactedPerDay ?? "-"}</td>
                             <td className="py-2 pr-4">
                               {Number.isFinite(row.avgResponseDays)
@@ -2276,7 +3025,7 @@ export default function App() {
                     value={topCountryGrowth?.name || "-"}
                     helper={
                       topCountryGrowth
-                        ? `+${formatNumber(topCountryGrowth.delta)} leads (${formatPct(topCountryGrowth.pctChange)}; ${formatNumber(
+                        ? `${topDestinationDelta >= 0 ? "+" : ""}${formatNumber(topDestinationDelta)} leads (${formatPct(topCountryGrowth.pctChange)}; ${formatNumber(
                             topCountryGrowth.current
                           )} vs ${formatNumber(topCountryGrowth.previous)})`
                         : "No growth delta for selected period"
@@ -2373,9 +3122,12 @@ export default function App() {
                         <tr className="text-left">
                           <th className="py-2 pr-4">Destination</th>
                           <th className="py-2 pr-4">Total leads</th>
-                          <th className="py-2 pr-4">Assigned</th>
+                          <th className="py-2 pr-4">Contacted</th>
                           <th className="py-2 pr-4">Interested</th>
                           <th className="py-2 pr-4">Not contacted</th>
+                          <th className="py-2 pr-4">Eligible</th>
+                          <th className="py-2 pr-4">Not eligible</th>
+                          <th className="py-2 pr-4">Eligibility rate</th>
                         </tr>
                       </thead>
                       <tbody className="text-slate-100">
@@ -2386,9 +3138,20 @@ export default function App() {
                           >
                             <td className="py-2 pr-4">{row.name}</td>
                             <td className="py-2 pr-4">{formatNumber(row.total)}</td>
-                            <td className="py-2 pr-4">{formatNumber(row.assigned)}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.contacted)}</td>
                             <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
                             <td className="py-2 pr-4">{formatNumber(row.notContacted)}</td>
+                            <td className="py-2 pr-4">
+                              {row.eligibilityConfigured ? formatNumber(row.eligible) : "-"}
+                            </td>
+                            <td className="py-2 pr-4">
+                              {row.eligibilityConfigured ? formatNumber(row.notEligible) : "-"}
+                            </td>
+                            <td className="py-2 pr-4">
+                              {row.eligibilityConfigured && row.eligibilityRate !== null
+                                ? `${row.eligibilityRate}%`
+                                : "-"}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -2482,14 +3245,14 @@ export default function App() {
                       }}
                     />
                     <Legend />
-                    {(stats?.byCounselor ?? [])
-                      .filter((item) => item.name !== "Not assigned yet")
-                      .map((item, index) => (
+                    {leaderboardRows
+                      .map((row) => row.name)
+                      .map((name, index) => (
                         <Line
-                          key={`agent-line-${item.name}`}
+                          key={`agent-line-${name}`}
                           type="monotone"
-                          dataKey={item.name}
-                          name={item.name}
+                          dataKey={name}
+                          name={name}
                           stroke={STATUS_COLORS[index % STATUS_COLORS.length]}
                           strokeWidth={2}
                           dot={false}
@@ -2536,24 +3299,24 @@ export default function App() {
           <>
             <section className="grid gap-4 md:grid-cols-3">
               <StatCard
-                title="Active countries"
+                title="Active destinations"
                 value={countryDetails.length}
               />
               <StatCard title="Total leads" value={stats?.totals?.total ?? 0} />
               <StatCard
-                title="Top country"
+                title="Top destination"
                 value={countryDetails[0]?.name ?? "-"}
               />
             </section>
             <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
               <h3 className="text-base font-semibold text-slate-100 mb-4">
-                Country performance
+                Destination performance
               </h3>
               <div className="overflow-auto">
                 <table className="min-w-full text-sm">
                   <thead className="text-slate-400">
                     <tr className="text-left">
-                      <th className="py-2 pr-4">Country</th>
+                      <th className="py-2 pr-4">Destination</th>
                       <th className="py-2 pr-4">Total</th>
                       <th className="py-2 pr-4">Interested</th>
                       <th className="py-2 pr-4">Follow-up</th>

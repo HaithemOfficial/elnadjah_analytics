@@ -1,8 +1,14 @@
 const cron = require("node-cron");
-const { runDailySummaryEmail, runWeeklySummaryEmail } = require("./dailySummary");
+const {
+  runDailySummaryEmail,
+  runWeeklySummaryEmail,
+  runAgentAlertsEmail,
+  runWeeklyManagerPack,
+} = require("./dailySummary");
 
 let dailyTask = null;
 let weeklyTask = null;
+let alertsTask = null;
 
 function startNotificationScheduler() {
   const dailyEnabled =
@@ -36,8 +42,40 @@ function startNotificationScheduler() {
     }
   }
 
+  const alertsEnabled =
+    String(process.env.AGENT_ALERTS_ENABLED || "false").toLowerCase() === "true";
+  if (alertsEnabled) {
+    const alertsCronExpr = process.env.AGENT_ALERTS_CRON || process.env.DAILY_SUMMARY_CRON || "0 9 * * *";
+    const alertsTimezone =
+      process.env.AGENT_ALERTS_TIMEZONE ||
+      process.env.WEEKLY_SUMMARY_TIMEZONE ||
+      process.env.DAILY_SUMMARY_TIMEZONE ||
+      "UTC";
+
+    if (!cron.validate(alertsCronExpr)) {
+      console.error(`[notifications] Invalid AGENT_ALERTS_CRON expression: ${alertsCronExpr}`);
+    } else {
+      alertsTask = cron.schedule(
+        alertsCronExpr,
+        async () => {
+          try {
+            const result = await runAgentAlertsEmail("scheduler");
+            console.log(
+              `[notifications] Agent alerts check completed: ${result.weekly.alertsCount} agents flagged, ${result.delivery.count} emails sent`
+            );
+          } catch (error) {
+            console.error(`[notifications] Agent alerts failed: ${error.message}`);
+          }
+        },
+        { timezone: alertsTimezone }
+      );
+
+      console.log(`[notifications] Agent alerts scheduler enabled: '${alertsCronExpr}' (${alertsTimezone})`);
+    }
+  }
+
   if (weeklyEnabled) {
-    const weeklyCronExpr = process.env.WEEKLY_SUMMARY_CRON || "0 21 * * 5";
+    const weeklyCronExpr = process.env.WEEKLY_SUMMARY_CRON || "0 11 * * 5";
     const weeklyTimezone =
       process.env.WEEKLY_SUMMARY_TIMEZONE ||
       process.env.DAILY_SUMMARY_TIMEZONE ||
@@ -50,9 +88,9 @@ function startNotificationScheduler() {
         weeklyCronExpr,
         async () => {
           try {
-            const result = await runWeeklySummaryEmail("scheduler");
+            const result = await runWeeklyManagerPack("scheduler");
             console.log(
-              `[notifications] Weekly summary sent for ${result.summary.period.start} to ${result.delivery.recipients.join(", ")}`
+              `[notifications] Weekly manager pack sent for ${result.summary.period.start}; summary to ${result.delivery.summary.recipients.join(", ")}`
             );
           } catch (error) {
             console.error(`[notifications] Weekly summary failed: ${error.message}`);
@@ -65,11 +103,11 @@ function startNotificationScheduler() {
     }
   }
 
-  if (!dailyEnabled && !weeklyEnabled) {
+  if (!dailyEnabled && !weeklyEnabled && !alertsEnabled) {
     return null;
   }
 
-  return { dailyTask, weeklyTask };
+  return { dailyTask, weeklyTask, alertsTask };
 }
 
 module.exports = {

@@ -16,6 +16,16 @@ const HEADER_MAP = {
   counselor: ["counselor", "counsellor", "مستشار", "استشار"],
   status: ["lead status", "status", "stage", "الحالة", "مرحلة"],
   destination: ["destination", "country", "وجهة", "الدولة", "بلد"],
+  lastStateUpdate: [
+    "edited timestamp",
+    "edited at",
+    "stage edited",
+    "last state",
+    "last update",
+    "updated at",
+    "آخر تعديل",
+    "آخر تحديث",
+  ],
 };
 
 const normalize = (value) => String(value || "").trim().toLowerCase();
@@ -147,12 +157,21 @@ function rowsToMinimalLeads(rows) {
         counselor: getValue("counselor") || "",
         status: getValue("status") || "",
         destination: getValue("destination") || "",
+        lastStateUpdate: parseDate(getValue("lastStateUpdate")),
       };
     });
 }
 
+function getAgentTouchDate(lead) {
+  return lead.lastStateUpdate || null; // column V (Edited Timestamp) only
+}
+
 function hasAssignedAgent(lead) {
   return Boolean(String(lead.counselor || "").trim());
+}
+
+function hasContactedLead(lead) {
+  return Boolean(getAgentTouchDate(lead));
 }
 
 function getSummaryWindow(targetDate) {
@@ -186,37 +205,141 @@ function getWeeklySummaryWindow(targetDate) {
     process.env.DAILY_SUMMARY_TIMEZONE ||
     "UTC";
 
-  if (targetDate) {
-    const ref = dayjs.tz(targetDate, "YYYY-MM-DD", summaryTimezone);
-    if (!ref.isValid()) {
-      throw new Error("Invalid target date. Use YYYY-MM-DD.");
-    }
+  const ref = targetDate
+    ? dayjs.tz(targetDate, "YYYY-MM-DD", summaryTimezone)
+    : dayjs().tz(summaryTimezone);
 
-    // Weekly period is always Friday 00:00 -> next Friday 00:00 (end excluded).
-    let end = ref.startOf("day").day(5);
-    if (!end.isAfter(ref.startOf("day"))) {
-      end = end.add(7, "day");
-    }
-    const start = end.subtract(7, "day");
-    return {
-      timezone: summaryTimezone,
-      start,
-      end,
-    };
+  if (!ref.isValid()) {
+    throw new Error("Invalid target date. Use YYYY-MM-DD.");
   }
 
-  const now = dayjs().tz(summaryTimezone);
-
-  // Default run uses the last fully closed Friday-based week.
-  let end = now.startOf("day").day(5);
-  if (end.isAfter(now)) {
-    end = end.subtract(7, "day");
-  }
+  // Algeria week: Saturday → Friday.
+  // Always return the last COMPLETED week so metrics are stable and meaningful.
+  // On Friday the current week ends today, so it is returned.
+  const dayIndex = ref.startOf("day").day(); // 0=Sun ... 5=Fri, 6=Sat
+  const daysSinceFriday = (dayIndex - 5 + 7) % 7; // 0 on Fri, 1 on Sat, 2 on Sun …
+  const lastFriday = ref.startOf("day").subtract(daysSinceFriday, "day");
+  const end = lastFriday.add(1, "day"); // exclusive end (Saturday after last Friday)
+  const start = lastFriday.subtract(6, "day"); // previous Saturday
 
   return {
     timezone: summaryTimezone,
-    start: end.subtract(7, "day"),
+    start,
     end,
+  };
+}
+
+function parseAgentEmailMap(value) {
+  const map = new Map();
+  String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .forEach((entry) => {
+      const [name, email] = entry.split(":").map((part) => String(part || "").trim());
+      if (name && email) {
+        map.set(name.toLowerCase(), email);
+      }
+    });
+  return map;
+}
+
+function getConsecutiveInactiveDays(activityDays, nowInTz) {
+  let streak = 0;
+  let cursor = nowInTz.startOf("day").subtract(1, "day");
+
+  for (let i = 0; i < 21; i += 1) {
+    const key = cursor.format("YYYY-MM-DD");
+    if (activityDays.has(key)) {
+      break;
+    }
+    streak += 1;
+    cursor = cursor.subtract(1, "day");
+  }
+
+  return streak;
+}
+
+function buildWeeklyAgentMetrics(leads, targetDate) {
+  const window = getWeeklySummaryWindow(targetDate);
+  const { start, end, timezone: summaryTimezone } = window;
+  const nowInTz = dayjs().tz(summaryTimezone);
+
+  // Build per-agent all-time activity days (col V) for the consecutive-inactive check,
+  // and per-agent weekly stats (within the last completed week window).
+  const agentsMap = new Map();
+  const allTimeActivityDays = new Map(); // agentName → Set<YYYY-MM-DD>
+
+  leads.forEach((lead) => {
+    if (!hasAssignedAgent(lead)) return;
+    const name = String(lead.counselor || "").trim();
+
+    // Track all-time activity from col V regardless of week window
+    const touchDate = getAgentTouchDate(lead);
+    if (touchDate) {
+      if (!allTimeActivityDays.has(name)) allTimeActivityDays.set(name, new Set());
+      allTimeActivityDays.get(name).add(dayjs(touchDate).tz(summaryTimezone).format("YYYY-MM-DD"));
+    }
+
+    // Weekly stats: only leads touched within the window
+    if (!touchDate) return;
+    const ts = dayjs(touchDate).tz(summaryTimezone);
+    if (!((ts.isAfter(start) || ts.isSame(start)) && ts.isBefore(end))) return;
+
+    if (!agentsMap.has(name)) {
+      agentsMap.set(name, { name, touched: 0, interested: 0, activityDays: new Set() });
+    }
+    const row = agentsMap.get(name);
+    row.touched += 1;
+    row.activityDays.add(ts.format("YYYY-MM-DD"));
+    if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
+      row.interested += 1;
+    }
+  });
+
+  // Only process agents that have at least one lastStateUpdate record ever —
+  // agents with no col V data would appear falsely inactive.
+  const rows = Array.from(allTimeActivityDays.entries()).map(([name, allDays]) => {
+    const row = agentsMap.get(name) || { name, touched: 0, interested: 0, activityDays: new Set() };
+    const activeDays = row.activityDays.size;
+    const inactiveDaysInWeek = Math.max(7 - activeDays, 0);
+    const interestedRate = row.touched ? (row.interested / row.touched) * 100 : 0;
+    const consecutiveInactiveDays = getConsecutiveInactiveDays(allDays, nowInTz);
+
+    const alerts = [];
+    if (consecutiveInactiveDays >= 2) {
+      alerts.push(`Inactive for ${consecutiveInactiveDays} full days in a row`);
+    }
+    if (inactiveDaysInWeek >= 3) {
+      alerts.push(`Worked only ${activeDays} day${activeDays !== 1 ? "s" : ""} last week (minimum 4 required)`);
+    }
+    if (row.touched < 50) {
+      alerts.push(`Contacted only ${row.touched} leads last week (minimum 50 required)`);
+    }
+    if (row.touched > 0 && interestedRate < 10) {
+      alerts.push(`Interested rate is ${interestedRate.toFixed(1)}% last week (minimum 10% required)`);
+    }
+
+    return {
+      name: row.name,
+      touched: row.touched,
+      interested: row.interested,
+      interestedRate: Number(interestedRate.toFixed(1)),
+      activeDays,
+      inactiveDaysInWeek,
+      consecutiveInactiveDays,
+      alerts,
+      hasAlert: alerts.length > 0,
+      period: {
+        start: start.format("YYYY-MM-DD"),
+        end: end.subtract(1, "day").format("YYYY-MM-DD"),
+      },
+    };
+  });
+
+  return {
+    window,
+    agents: rows.sort((a, b) => b.touched - a.touched),
   };
 }
 
@@ -233,7 +356,7 @@ function buildSummaryForWindow(leads, window, label) {
   const interested = periodLeads.filter(
     (lead) => normalizeStatusCategory(lead.status) === "Interested / Will apply"
   ).length;
-  const assigned = periodLeads.filter(hasAssignedAgent).length;
+  const assigned = periodLeads.filter(hasContactedLead).length;
   const notContacted = Math.max(total - assigned, 0);
 
   const destinationStats = {};
@@ -252,7 +375,7 @@ function buildSummaryForWindow(leads, window, label) {
       destinationStats[destination].interested += 1;
     }
 
-    if (hasAssignedAgent(lead)) {
+    if (hasContactedLead(lead) && hasAssignedAgent(lead)) {
       const agent = lead.counselor.trim();
       if (!byAgent[agent]) {
         byAgent[agent] = {
@@ -527,6 +650,197 @@ async function sendWeeklySummaryEmail(summary) {
   return { messageId: info.messageId, recipients };
 }
 
+function buildAgentAlertEmailHtml(agentRow, timezone) {
+  const reasons = agentRow.alerts.map((reason) => `<li>${reason}</li>`).join("");
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;color:#0f172a;">
+      <h2 style="color:#b91c1c;">Red Alert - Agent Activity</h2>
+      <p><strong>Agent:</strong> ${agentRow.name}</p>
+      <p><strong>Week:</strong> ${agentRow.period.start} -> ${agentRow.period.end} (${timezone})</p>
+      <p><strong>Contacted:</strong> ${agentRow.touched} | <strong>Interested:</strong> ${agentRow.interested} (${agentRow.interestedRate}%)</p>
+      <p><strong>Active days:</strong> ${agentRow.activeDays} | <strong>Inactive days:</strong> ${agentRow.inactiveDaysInWeek}</p>
+      <p><strong>Alert reasons:</strong></p>
+      <ul>${reasons}</ul>
+      <p style="margin-top:14px;"><strong>Required action:</strong> Please reply to this email with your explanation and corrective action plan.</p>
+    </div>
+  `;
+}
+
+async function sendAgentAlertEmails(weeklyMetrics) {
+  const recipientsManager = parseRecipients(process.env.AGENT_ALERT_MANAGER_RECIPIENTS);
+  const recipientsFounders = parseRecipients(process.env.AGENT_ALERT_FOUNDERS_RECIPIENTS);
+  const agentMap = parseAgentEmailMap(process.env.AGENT_EMAIL_MAP);
+  const from = process.env.SMTP_FROM;
+  const transporter = getTransporter();
+
+  if (!from || !transporter) {
+    throw new Error("SMTP settings are incomplete (SMTP_FROM/SMTP_HOST/PORT/USER/PASS).");
+  }
+
+  const alertedAgents = weeklyMetrics.agents.filter((agent) => agent.hasAlert);
+  const deliveries = [];
+
+  for (const agent of alertedAgents) {
+    const agentEmail = agentMap.get(agent.name.toLowerCase()) || "";
+    const toRecipients = Array.from(
+      new Set([
+        ...recipientsManager,
+        ...recipientsFounders,
+        ...(agentEmail ? [agentEmail] : []),
+      ])
+    );
+
+    if (!toRecipients.length) {
+      continue;
+    }
+
+    const subject = `RED ALERT - ${agent.name} weekly activity needs attention`;
+    const text = [
+      `Agent: ${agent.name}`,
+      `Week: ${agent.period.start} -> ${agent.period.end} (${weeklyMetrics.window.timezone})`,
+      `Contacted: ${agent.touched}`,
+      `Interested: ${agent.interested} (${agent.interestedRate}%)`,
+      `Active days: ${agent.activeDays}`,
+      `Inactive days this week: ${agent.inactiveDaysInWeek}`,
+      ...agent.alerts.map((reason) => `- ${reason}`),
+      "",
+      "Required action: Agent must reply to this email with explanation and action plan.",
+    ].join("\n");
+
+    const info = await transporter.sendMail({
+      from,
+      to: toRecipients.join(","),
+      replyTo: recipientsManager.join(",") || undefined,
+      subject,
+      text,
+      html: buildAgentAlertEmailHtml(agent, weeklyMetrics.window.timezone),
+    });
+
+    deliveries.push({
+      agent: agent.name,
+      messageId: info.messageId,
+      recipients: toRecipients,
+      alerts: agent.alerts,
+    });
+  }
+
+  return {
+    count: deliveries.length,
+    deliveries,
+  };
+}
+
+function buildAgentWeeklyEmailHtml(agentRow, timezone) {
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;color:#0f172a;">
+      <h2>Weekly Agent Performance</h2>
+      <p><strong>Agent:</strong> ${agentRow.name}</p>
+      <p><strong>Week:</strong> ${agentRow.period.start} -> ${agentRow.period.end} (${timezone})</p>
+      <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0;">
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;"><strong>Contacted</strong><br/>${agentRow.touched}</div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;"><strong>Interested</strong><br/>${agentRow.interested}</div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;"><strong>Interested rate</strong><br/>${agentRow.interestedRate}%</div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;"><strong>Active days</strong><br/>${agentRow.activeDays}/7</div>
+      </div>
+    </div>
+  `;
+}
+
+async function sendWeeklyAgentPerformanceEmails(weeklyMetrics) {
+  const recipientsManager = parseRecipients(process.env.WEEKLY_AGENT_MANAGER_RECIPIENTS);
+  const agentMap = parseAgentEmailMap(process.env.AGENT_EMAIL_MAP);
+  const from = process.env.SMTP_FROM;
+  const transporter = getTransporter();
+
+  if (!from || !transporter) {
+    throw new Error("SMTP settings are incomplete (SMTP_FROM/SMTP_HOST/PORT/USER/PASS).");
+  }
+
+  const deliveries = [];
+  for (const agent of weeklyMetrics.agents) {
+    const agentEmail = agentMap.get(agent.name.toLowerCase()) || "";
+    const toRecipients = Array.from(new Set([...recipientsManager, ...(agentEmail ? [agentEmail] : [])]));
+    if (!toRecipients.length) continue;
+
+    const subject = `Weekly performance - ${agent.name} (${agent.period.start} -> ${agent.period.end})`;
+    const text = [
+      `Agent: ${agent.name}`,
+      `Week: ${agent.period.start} -> ${agent.period.end} (${weeklyMetrics.window.timezone})`,
+      `Contacted: ${agent.touched}`,
+      `Interested: ${agent.interested}`,
+      `Interested rate: ${agent.interestedRate}%`,
+      `Active days: ${agent.activeDays}/7`,
+    ].join("\n");
+
+    const info = await transporter.sendMail({
+      from,
+      to: toRecipients.join(","),
+      subject,
+      text,
+      html: buildAgentWeeklyEmailHtml(agent, weeklyMetrics.window.timezone),
+    });
+
+    deliveries.push({
+      agent: agent.name,
+      messageId: info.messageId,
+      recipients: toRecipients,
+    });
+  }
+
+  return {
+    count: deliveries.length,
+    deliveries,
+  };
+}
+
+async function runAgentAlertsEmail(trigger = "manual", targetDate) {
+  const rows = await getSheetRows();
+  const leads = rowsToMinimalLeads(rows);
+  const weeklyMetrics = buildWeeklyAgentMetrics(leads, targetDate);
+  const delivery = await sendAgentAlertEmails(weeklyMetrics);
+
+  return {
+    trigger,
+    weekly: {
+      period: {
+        start: weeklyMetrics.window.start.format("YYYY-MM-DD"),
+        end: weeklyMetrics.window.end.subtract(1, "day").format("YYYY-MM-DD"),
+        timezone: weeklyMetrics.window.timezone,
+      },
+      alertsCount: weeklyMetrics.agents.filter((agent) => agent.hasAlert).length,
+    },
+    delivery,
+  };
+}
+
+async function runWeeklyManagerPack(trigger = "manual", targetDate) {
+  const rows = await getSheetRows();
+  const leads = rowsToMinimalLeads(rows);
+  const summary = buildWeeklySummary(leads, targetDate);
+  const weeklyMetrics = buildWeeklyAgentMetrics(leads, targetDate);
+  const summaryDelivery = await sendWeeklySummaryEmail(summary);
+  const agentPerformanceDelivery = await sendWeeklyAgentPerformanceEmails(weeklyMetrics);
+  const alertDelivery = await sendAgentAlertEmails(weeklyMetrics);
+
+  return {
+    trigger,
+    summary,
+    weeklyAgentMetrics: {
+      period: {
+        start: weeklyMetrics.window.start.format("YYYY-MM-DD"),
+        end: weeklyMetrics.window.end.subtract(1, "day").format("YYYY-MM-DD"),
+        timezone: weeklyMetrics.window.timezone,
+      },
+      agents: weeklyMetrics.agents,
+    },
+    delivery: {
+      summary: summaryDelivery,
+      agentPerformance: agentPerformanceDelivery,
+      alerts: alertDelivery,
+    },
+  };
+}
+
 async function runDailySummaryEmail(trigger = "manual", targetDate) {
   const rows = await getSheetRows();
   const leads = rowsToMinimalLeads(rows);
@@ -556,4 +870,7 @@ async function runWeeklySummaryEmail(trigger = "manual", targetDate) {
 module.exports = {
   runDailySummaryEmail,
   runWeeklySummaryEmail,
+  runAgentAlertsEmail,
+  runWeeklyManagerPack,
+  buildWeeklyAgentMetrics,
 };

@@ -13,7 +13,16 @@ function getUsers() {
   const adminEmail = normalizeEmail(process.env.ADMIN_EMAIL || "admin@elnadjah.com");
   const adminPassword = String(process.env.ADMIN_PASSWORD || "Admin@123456");
 
-  return [
+  const founder1Email = normalizeEmail(process.env.FOUNDER1_EMAIL || "");
+  const founder1Password = String(process.env.FOUNDER1_PASSWORD || "");
+
+  const founder2Email = normalizeEmail(process.env.FOUNDER2_EMAIL || "");
+  const founder2Password = String(process.env.FOUNDER2_PASSWORD || "");
+
+  const managerEmail = normalizeEmail(process.env.MANAGER_EMAIL || "");
+  const managerPassword = String(process.env.MANAGER_PASSWORD || "");
+
+  const users = [
     {
       email: adminEmail,
       password: adminPassword,
@@ -21,6 +30,35 @@ function getUsers() {
       name: "Admin",
     },
   ];
+
+  if (founder1Email && founder1Password) {
+    users.push({
+      email: founder1Email,
+      password: founder1Password,
+      role: "admin",
+      name: "Founder 1",
+    });
+  }
+
+  if (founder2Email && founder2Password) {
+    users.push({
+      email: founder2Email,
+      password: founder2Password,
+      role: "admin",
+      name: "Founder 2",
+    });
+  }
+
+  if (managerEmail && managerPassword) {
+    users.push({
+      email: managerEmail,
+      password: managerPassword,
+      role: "manager",
+      name: "Manager",
+    });
+  }
+
+  return users;
 }
 
 function findUserByEmail(email) {
