@@ -1643,6 +1643,56 @@ export default function App() {
     return stats?.teamPerformanceSeries ?? [];
   }, [stats]);
 
+  const agentContactedTrendSeries = useMemo(() => {
+    if (!managerScopedLeads || !managerScopedLeads.length) return [];
+    
+    const dateAgentMap = new Map();
+    const agentSet = new Set();
+    
+    managerScopedLeads.forEach((lead) => {
+      const contactDate = getContactDate(lead);
+      if (!contactDate) return;
+      
+      const dateKey = toLocalDateString(contactDate);
+      const agent = String(lead?.counselor || "").trim();
+      if (!agent) return;
+      
+      agentSet.add(agent);
+      
+      if (!dateAgentMap.has(dateKey)) {
+        dateAgentMap.set(dateKey, { date: dateKey, agents: {} });
+      }
+      
+      const dayData = dateAgentMap.get(dateKey);
+      if (!dayData.agents[agent]) {
+        dayData.agents[agent] = 0;
+      }
+      dayData.agents[agent] += 1;
+    });
+    
+    const topAgents = Array.from(agentSet)
+      .map((agent) => {
+        let total = 0;
+        dateAgentMap.forEach((dayData) => {
+          total += dayData.agents[agent] || 0;
+        });
+        return { agent, total };
+      })
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 8)
+      .map((row) => row.agent);
+    
+    return Array.from(dateAgentMap.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((dayData) => {
+        const obj = { date: dayData.date };
+        topAgents.forEach((agent) => {
+          obj[agent] = dayData.agents[agent] || 0;
+        });
+        return obj;
+      });
+  }, [managerScopedLeads]);
+
   const sourceVolumeRows = [...(stats?.bySource ?? [])].sort((a, b) => b.value - a.value);
   const topSourceRows = sourceVolumeRows.slice(0, 8);
   const leadGenTopSourceName = topSourceRows[0]?.name || "-";
@@ -3076,6 +3126,43 @@ export default function App() {
                           strokeWidth={3}
                           dot={false}
                         />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </ChartCard>
+
+                <ChartCard title="Agent contacted leads over time">
+                  <p className="-mt-3 mb-3 text-xs text-slate-400">
+                    Contacted leads for each agent in the selected period (top 8 agents).
+                  </p>
+                  <div style={{ height: 300 }}>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart data={agentContactedTrendSeries} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis
+                          dataKey="date"
+                          tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                          stroke="#94a3b8"
+                        />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" />
+                        <Tooltip
+                          labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                          contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
+                        />
+                        <Legend />
+                        {agentContactedTrendSeries[0] &&
+                          Object.keys(agentContactedTrendSeries[0])
+                            .filter((key) => key !== "date")
+                            .map((agentName, index) => (
+                              <Line
+                                key={agentName}
+                                type="monotone"
+                                dataKey={agentName}
+                                stroke={STATUS_COLORS[index % STATUS_COLORS.length]}
+                                strokeWidth={2}
+                                dot={false}
+                              />
+                            ))}
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
