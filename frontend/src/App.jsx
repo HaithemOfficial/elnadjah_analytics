@@ -837,6 +837,7 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
   const [alertsCollapsed, setAlertsCollapsed] = useState(true);
+  const [selectedAgentForChart, setSelectedAgentForChart] = useState(null);
 
   const storedFilters = (() => {
     try {
@@ -1732,6 +1733,19 @@ export default function App() {
         return obj;
       });
   }, [managerScopedLeads]);
+
+  const availableAgents = useMemo(() => {
+    if (!agentContactedTrendSeries.length) return [];
+    const keys = Object.keys(agentContactedTrendSeries[0]).filter((key) => key !== "date");
+    return keys.sort();
+  }, [agentContactedTrendSeries]);
+
+  const filteredAgentContactedData = useMemo(() => {
+    if (!selectedAgentForChart || !agentContactedTrendSeries.length) {
+      return agentContactedTrendSeries;
+    }
+    return agentContactedTrendSeries;
+  }, [agentContactedTrendSeries, selectedAgentForChart]);
 
   const managerAgentRows = useMemo(() => {
     const SLA_HOURS = 24;
@@ -3132,12 +3146,28 @@ export default function App() {
                 </ChartCard>
 
                 <ChartCard title="Agent contacted leads over time">
-                  <p className="-mt-3 mb-3 text-xs text-slate-400">
-                    Contacted leads for each agent in the selected period (top 8 agents).
-                  </p>
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                      <p className="-mt-3 text-xs text-slate-400">
+                        Contacted leads by agent in the selected period.
+                      </p>
+                    </div>
+                    <select
+                      value={selectedAgentForChart || ""}
+                      onChange={(e) => setSelectedAgentForChart(e.target.value || null)}
+                      className="text-xs bg-slate-800 border border-slate-700 text-slate-100 rounded px-2 py-1 hover:border-slate-600 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="">All agents (top 8)</option>
+                      {availableAgents.map((agent) => (
+                        <option key={agent} value={agent}>
+                          {agent}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <div style={{ height: 300 }}>
                     <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={agentContactedTrendSeries} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+                      <LineChart data={filteredAgentContactedData} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
                         <XAxis
                           dataKey="date"
@@ -3150,8 +3180,18 @@ export default function App() {
                           contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
                         />
                         <Legend />
-                        {agentContactedTrendSeries[0] &&
-                          Object.keys(agentContactedTrendSeries[0])
+                        {selectedAgentForChart ? (
+                          <Line
+                            type="monotone"
+                            dataKey={selectedAgentForChart}
+                            stroke="#22C55E"
+                            strokeWidth={3}
+                            dot={false}
+                            name={selectedAgentForChart}
+                          />
+                        ) : (
+                          filteredAgentContactedData[0] &&
+                          Object.keys(filteredAgentContactedData[0])
                             .filter((key) => key !== "date")
                             .map((agentName, index) => (
                               <Line
@@ -3162,7 +3202,8 @@ export default function App() {
                                 strokeWidth={2}
                                 dot={false}
                               />
-                            ))}
+                            ))
+                        )}
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
