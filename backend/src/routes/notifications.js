@@ -9,6 +9,7 @@ const {
   getVapidPublicKey,
   saveSubscription,
   removeSubscription,
+  sendPushToAll,
   checkLeadThresholdAndNotify,
 } = require("../notifications/push");
 
@@ -115,6 +116,31 @@ router.post("/push/unsubscribe", (req, res) => {
     message: "Push subscription removed.",
     result,
   });
+});
+
+router.post("/push/test", async (_req, res) => {
+  try {
+    const result = await sendPushToAll({
+      title: "ElNadjah test notification",
+      body: "Your phone push notifications are working.",
+      url: "/",
+      tag: `test-push-${Date.now()}`,
+      data: {
+        type: "test",
+      },
+    });
+
+    res.json({
+      ok: true,
+      message: "Test push sent.",
+      result,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
 });
 
 router.post("/lead-threshold/check", async (req, res) => {
