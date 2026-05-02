@@ -1,0 +1,48 @@
+{
+  "name": "Lead Analyzer Dashboard",
+  "short_name": "Lead Analyzer",
+  "description": "Real-time analytics dashboard for lead management and agent performance tracking",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#0f172a",
+  "background_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/favicon-32x32.png",
+      "sizes": "540x720",
+      "type": "image/png",
+      "form_factor": "narrow"
+    },
+    {
+      "src": "/favicon-32x32.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide"
+    }
+  ],
+  "categories": ["productivity", "business"],
+  "screenshots_dark": [
+    {
+      "src": "/favicon-32x32.png",
+      "sizes": "540x720",
+      "type": "image/png",
+      "form_factor": "narrow"
+    }
+  ]
+}

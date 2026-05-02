@@ -430,6 +430,23 @@ function leadsOverTimeInterested(leads, dateField, granularity) {
     .map((date) => ({ date, count: counts[date] }));
 }
 
+function leadsOverTimeFollowUp(leads, granularity) {
+  const counts = {};
+  const format = granularity === "month" ? "YYYY-MM" : "YYYY-MM-DD";
+
+  leads.forEach((lead) => {
+    const contactDate = getContactDate(lead);
+    if (!contactDate) return;
+    if (normalizeStatusCategory(lead.status) !== "Follow-Up / No Reply") return;
+    const key = dayjs(contactDate).format(format);
+    counts[key] = (counts[key] || 0) + 1;
+  });
+
+  return Object.keys(counts)
+    .sort()
+    .map((date) => ({ date, count: counts[date] }));
+}
+
 function leadsOverTimeByCounselor(leads, granularity, startDate, endDate) {
   const buckets = {};
   const format = granularity === "month" ? "YYYY-MM" : "YYYY-MM-DD";
@@ -484,6 +501,33 @@ function leadsOverTimePerformance(leads, dateField, granularity, startDate, endD
       total: totals[date] || 0,
       contacted: contacted[date] || 0,
     }));
+}
+
+function buildTeamPerformanceSeries(leads, granularity, startDate, endDate) {
+  const contacted = {};
+  const interested = {};
+  const followUp = {};
+  const format = granularity === "month" ? "YYYY-MM" : "YYYY-MM-DD";
+
+  leads.forEach((lead) => {
+    const contactDate = getContactDate(lead);
+    if (!contactDate) return;
+    if (startDate && dayjs(contactDate).isBefore(startDate, "day")) return;
+    if (endDate && dayjs(contactDate).isAfter(endDate, "day")) return;
+    const key = dayjs(contactDate).format(format);
+    contacted[key] = (contacted[key] || 0) + 1;
+    const cat = normalizeStatusCategory(lead.status);
+    if (cat === "Interested / Will apply") interested[key] = (interested[key] || 0) + 1;
+    if (cat === "Follow-Up / No Reply") followUp[key] = (followUp[key] || 0) + 1;
+  });
+
+  const allDates = new Set([...Object.keys(contacted), ...Object.keys(interested), ...Object.keys(followUp)]);
+  return Array.from(allDates).sort().map((date) => ({
+    date,
+    contacted: contacted[date] || 0,
+    interested: interested[date] || 0,
+    followUp: followUp[date] || 0,
+  }));
 }
 
 function buildOverallPerformance(series) {
@@ -707,16 +751,23 @@ function topCountryByGrowth(leads, startDate, endDate, dateField) {
     dateField
   );
 
-  let best = null;
-  Object.keys(current).forEach((name) => {
-    const curr = current[name] || 0;
-    const prev = previous[name] || 0;
-    const pct = prev ? ((curr - prev) / prev) * 100 : curr ? 100 : 0;
-    if (!best || pct > best.pctChange) {
-      best = { name, current: curr, previous: prev, pctChange: Math.trunc(pct) };
-    }
-  });
+  const ranked = Object.keys(current)
+    .map((name) => {
+      const curr = current[name] || 0;
+      const prev = previous[name] || 0;
+      const delta = curr - prev;
+      const pct = prev ? ((delta) / prev) * 100 : curr ? 100 : 0;
+      return { name, current: curr, previous: prev, delta, pctChange: Math.trunc(pct) };
+    })
+    .filter((item) => item.delta > 0)
+    .sort((a, b) => {
+      if (b.delta !== a.delta) return b.delta - a.delta;
+      if (b.pctChange !== a.pctChange) return b.pctChange - a.pctChange;
+      return b.current - a.current;
+    });
 
+  if (!ranked.length) return null;
+  const { delta: _delta, ...best } = ranked[0];
   return best;
 }
 
@@ -730,7 +781,8 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
     prevEnd && lengthDays ? prevEnd.subtract(lengthDays - 1, "day") : null;
 
   const initRow = () => ({
-    contacted: 0,
+    newLeads: 0,
+    contactedInPeriod: 0,
     interested: 0,
     responseCount: 0,
     responseHoursSum: 0,
@@ -744,46 +796,41 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
 
   leads.forEach((lead) => {
     if (!lead.counselor) return;
+    const leadDate = getLeadDate(lead, dateField);
     const contactDate = getContactDate(lead);
-    if (!contactDate) return;
 
-    const targetMap =
-      periodStart && periodEnd
-        ? dayjs(contactDate).isBefore(periodStart, "day") ||
-          dayjs(contactDate).isAfter(periodEnd, "day")
-          ? null
-          : current
-        : current;
+    const inCurrentLeadPeriod =
+      leadDate && (!periodStart || !dayjs(leadDate).isBefore(periodStart, "day")) &&
+      (!periodEnd || !dayjs(leadDate).isAfter(periodEnd, "day"));
 
-    if (!targetMap) return;
+    const inCurrentContactPeriod =
+      contactDate && (!periodStart || !dayjs(contactDate).isBefore(periodStart, "day")) &&
+      (!periodEnd || !dayjs(contactDate).isAfter(periodEnd, "day"));
 
-    if (!targetMap.has(lead.counselor)) targetMap.set(lead.counselor, initRow());
-    const row = targetMap.get(lead.counselor);
-    row.contacted += 1;
+    if (!inCurrentLeadPeriod && !inCurrentContactPeriod) return;
 
-    const destination = lead.destination || "Unknown";
-    row.destinationCounts[destination] =
-      (row.destinationCounts[destination] || 0) + 1;
+    if (!current.has(lead.counselor)) current.set(lead.counselor, initRow());
+    const row = current.get(lead.counselor);
 
-    if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
-      row.interested += 1;
+    if (inCurrentLeadPeriod) {
+      row.newLeads += 1;
+      const destination = lead.destination || "Unknown";
+      row.destinationCounts[destination] = (row.destinationCounts[destination] || 0) + 1;
     }
 
-    if (lead.timestamp && contactDate) {
-      const days = dayjs(contactDate)
-        .startOf("day")
-        .diff(dayjs(lead.timestamp).startOf("day"), "day");
-      if (days >= 0) {
-        row.responseCount += 1;
-        row.responseHoursSum += days;
+    if (inCurrentContactPeriod) {
+      row.contactedInPeriod += 1;
+      if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
+        row.interested += 1;
       }
-
-      const inRange =
-        (!periodStart || !dayjs(contactDate).isBefore(periodStart, "day")) &&
-        (!periodEnd || !dayjs(contactDate).isAfter(periodEnd, "day"));
-      if (inRange && days >= 0) {
-        row.followUpCount += 1;
-        row.followUpDaysSum += days;
+      if (lead.timestamp) {
+        const hours = dayjs(contactDate).diff(dayjs(lead.timestamp), "minute") / 60;
+        if (hours >= 0) {
+          row.responseCount += 1;
+          row.responseHoursSum += hours;
+          row.followUpCount += 1;
+          row.followUpDaysSum += hours;
+        }
       }
     }
   });
@@ -791,32 +838,35 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
   if (prevStart && prevEnd) {
     leads.forEach((lead) => {
       if (!lead.counselor) return;
+      const leadDate = getLeadDate(lead, dateField);
       const contactDate = getContactDate(lead);
-      if (!contactDate) return;
-      if (
-        dayjs(contactDate).isBefore(prevStart, "day") ||
-        dayjs(contactDate).isAfter(prevEnd, "day")
-      ) {
-        return;
-      }
+
+      const inPrevLeadPeriod =
+        leadDate && !dayjs(leadDate).isBefore(prevStart, "day") && !dayjs(leadDate).isAfter(prevEnd, "day");
+
+      const inPrevContactPeriod =
+        contactDate && !dayjs(contactDate).isBefore(prevStart, "day") && !dayjs(contactDate).isAfter(prevEnd, "day");
+
+      if (!inPrevLeadPeriod && !inPrevContactPeriod) return;
 
       if (!previous.has(lead.counselor)) previous.set(lead.counselor, initRow());
       const row = previous.get(lead.counselor);
-      row.contacted += 1;
 
-      const destination = lead.destination || "Unknown";
-      row.destinationCounts[destination] =
-        (row.destinationCounts[destination] || 0) + 1;
-      if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
-        row.interested += 1;
+      if (inPrevLeadPeriod) {
+        row.newLeads += 1;
       }
-      if (lead.timestamp && contactDate) {
-        const days = dayjs(contactDate)
-          .startOf("day")
-          .diff(dayjs(lead.timestamp).startOf("day"), "day");
-        if (days >= 0) {
-          row.responseCount += 1;
-          row.responseHoursSum += days;
+
+      if (inPrevContactPeriod) {
+        row.contactedInPeriod += 1;
+        if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
+          row.interested += 1;
+        }
+        if (lead.timestamp && contactDate) {
+          const hours = dayjs(contactDate).diff(dayjs(lead.timestamp), "minute") / 60;
+          if (hours >= 0) {
+            row.responseCount += 1;
+            row.responseHoursSum += hours;
+          }
         }
       }
     });
@@ -824,38 +874,33 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
 
   const leaderboard = Array.from(current.entries()).map(([name, row]) => {
     const avgResponseDays = row.responseCount
-      ? Math.trunc(row.responseHoursSum / row.responseCount)
+      ? row.responseHoursSum / row.responseCount / 24
       : null;
     const prev = previous.get(name);
     const prevAvg = prev && prev.responseCount
-      ? prev.responseHoursSum / prev.responseCount
+      ? prev.responseHoursSum / prev.responseCount / 24
       : null;
     const responseChangePct =
       prevAvg !== null && avgResponseDays !== null
         ? Number((((avgResponseDays - prevAvg) / prevAvg) * 100).toFixed(1))
         : null;
-    const contactedChangePct = prev
-      ? pctChange(row.contacted, prev.contacted)
-      : null;
-    const interestedChangePct = prev
-      ? pctChange(row.interested, prev.interested)
-      : null;
     const followUpSpeedDays = row.followUpCount
-      ? Math.trunc(row.followUpDaysSum / row.followUpCount)
+      ? row.followUpDaysSum / row.followUpCount / 24
       : null;
     const topCountry = Object.entries(row.destinationCounts).sort(
       (a, b) => b[1] - a[1]
     )[0]?.[0] || "-";
-    const interestedRate = row.contacted
-      ? Math.trunc((row.interested / row.contacted) * 100)
+    const interestedRate = row.contactedInPeriod
+      ? Math.trunc((row.interested / row.contactedInPeriod) * 100)
       : 0;
     const avgContactedPerDay = lengthDays
-      ? Number((row.contacted / lengthDays).toFixed(2))
+      ? Number((row.contactedInPeriod / lengthDays).toFixed(2))
       : null;
 
     return {
-      name,
-      contacted: row.contacted,
+        name,
+        contacted: row.contactedInPeriod,
+      contactedInPeriod: row.contactedInPeriod,
       interested: row.interested,
       interestedRate,
       topCountry,
@@ -863,12 +908,13 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
       avgContactedPerDay,
       avgResponseDays,
       responseChangePct,
-      contactedChangePct,
-      interestedChangePct,
+      contactedChangePct: prev ? pctChange(row.newLeads, prev.newLeads) : null,
+      interestedChangePct: prev ? pctChange(row.interested, prev.interested) : null,
+      contactedInPeriodChangePct: prev ? pctChange(row.contactedInPeriod, prev.contactedInPeriod) : null,
     };
   });
 
-  return leaderboard.sort((a, b) => b.contacted - a.contacted);
+  return leaderboard.sort((a, b) => b.contactedInPeriod - a.contactedInPeriod || b.contacted - a.contacted);
 }
 
 function uniqueAgents(leads) {
@@ -926,13 +972,20 @@ router.get("/stats", async (req, res) => {
     const { leads } = await getCachedLeads();
 
     const allTime = req.query.all === "true";
-    const dateField = req.query.dateField || "timestamp";
     const hasStart = Boolean(req.query.startDate) && !allTime;
     const hasEnd = Boolean(req.query.endDate) && !allTime;
+    let dateField = req.query.dateField || "timestamp";
+    const hasExplicitDateField = typeof req.query.dateField !== "undefined";
+
+    // When a specific date range is requested and the client didn't
+    // explicitly provide `dateField`, prefer using the Edited timestamp
+    // (`lastStateUpdate`) for filtering so the dashboard reflects edits
+    // (contacts) that happened inside the selected period.
+    if ((hasStart || hasEnd) && !hasExplicitDateField) {
+      dateField = "lastStateUpdate";
+    }
     const latestTimestamp = getLatestTimestamp(leads, dateField);
     const latestDate = latestTimestamp ? dayjs(latestTimestamp) : dayjs();
-    const earliestTimestamp = getEarliestTimestamp(leads, dateField);
-    const earliestDate = earliestTimestamp ? dayjs(earliestTimestamp) : dayjs();
     const defaultEnd = dayjs().endOf("day");
     const defaultStart = dayjs().startOf("month");
 
@@ -957,56 +1010,91 @@ router.get("/stats", async (req, res) => {
       dateField,
     });
 
+    // Use submission `timestamp` as the canonical "demand" dimension for
+    // General KPIs (total leads, leads by stage, trends, top destination).
+    const filteredByTimestamp = filterLeads(leads, {
+      startDate,
+      endDate,
+      counselor,
+      destination,
+      dateField: "timestamp",
+    });
+
+    const filteredEarliestTs = getEarliestTimestamp(filteredByTimestamp, "timestamp");
+    const earliestDate = filteredEarliestTs ? dayjs(filteredEarliestTs) : dayjs();
+
     const rangeDays = startDate && endDate ? dayjs(endDate).diff(startDate, "day") + 1 : null;
     const granularity = rangeDays && rangeDays <= 60 ? "day" : "month";
 
-    const statusGroups = groupStatusCategories(filtered);
-    const counselorGroups = groupCount(filtered, "counselor", "Not assigned yet");
-    const destinationGroups = groupCount(filtered, "destination");
-    const sourceGroups = groupCount(filtered, "source");
-    const financeGroups = groupCount(filtered, "bac");
-    const eligibilityGroups = groupCount(filtered, "eligibility", "Unknown");
-    const stageGroups = groupCount(filtered, "status", "No stage");
+    // Groups for General KPIs are based on submitted leads (timestamp)
+    const statusGroups = groupStatusCategories(filteredByTimestamp);
+    const counselorGroups = groupCount(filteredByTimestamp, "counselor", "Not assigned yet");
+    const destinationGroups = groupCount(filteredByTimestamp, "destination");
+    const sourceGroups = groupCount(filteredByTimestamp, "source");
+    const financeGroups = groupCount(filteredByTimestamp, "bac");
+    const eligibilityGroups = groupCount(filteredByTimestamp, "eligibility", "Unknown");
+    const stageGroups = groupCount(filteredByTimestamp, "status", "No stage");
 
+    // Totals reflect leads submitted in the selected period (timestamp)
     const totals = {
-      total: filtered.length,
-      eligible: filtered.filter((lead) => {
+      total: filteredByTimestamp.length,
+      eligible: filteredByTimestamp.filter((lead) => {
         const value = normalize(lead.eligibility);
         return value.includes("eligible") && !value.includes("not");
       }).length,
-      notEligible: filtered.filter((lead) => {
+      notEligible: filteredByTimestamp.filter((lead) => {
         const value = normalize(lead.eligibility);
         return value.includes("not eligible");
       }).length,
-      interested: filtered.filter(
+      interested: filteredByTimestamp.filter(
         (lead) => normalizeStatusCategory(lead.status) === "Interested / Will apply"
       ).length,
-      followUp: filtered.filter(
+      followUp: filteredByTimestamp.filter(
         (lead) => normalizeStatusCategory(lead.status) === "Follow-Up / No Reply"
       ).length,
-      needsMoreInfo: filtered.filter(
+      needsMoreInfo: filteredByTimestamp.filter(
         (lead) =>
           normalizeStatusCategory(lead.status) === "Needs More Info / Thinking"
       ).length,
-      notInterested: filtered.filter(
+      notInterested: filteredByTimestamp.filter(
         (lead) =>
           normalizeStatusCategory(lead.status) === "Not Interested / Disqualified"
       ).length,
-      notObvious: filtered.filter(
+      notObvious: filteredByTimestamp.filter(
         (lead) =>
           normalizeStatusCategory(lead.status) === "Not obvious / You Don't Know"
       ).length,
-      notContacted: filtered.filter((lead) => !hasContactedLead(lead)).length,
+      notContacted: filteredByTimestamp.filter((lead) => !hasContactedLead(lead)).length,
     };
 
-    const contactedCount = filtered.filter(hasContactedLead).length;
-    const responseRate = filtered.length
-      ? Math.trunc((contactedCount / filtered.length) * 100)
+    // Count contacted leads among those submitted in the period. Contacted is
+    // determined by `lastStateUpdate` inside the selected period.
+    const contactedCount = filteredByTimestamp.filter((lead) => {
+      const contactDate = getContactDate(lead);
+      if (!contactDate) return false;
+      if (!startDate && !endDate) return true;
+      if (startDate && dayjs(contactDate).isBefore(startDate, "day")) return false;
+      if (endDate && dayjs(contactDate).isAfter(endDate, "day")) return false;
+      return true;
+    }).length;
+
+    // notContacted among submitted leads in period
+    totals.notContacted = filteredByTimestamp.filter((lead) => {
+      const contactDate = getContactDate(lead);
+      if (!contactDate) return true;
+      if (!startDate && !endDate) return false;
+      if (startDate && dayjs(contactDate).isBefore(startDate, "day")) return true;
+      if (endDate && dayjs(contactDate).isAfter(endDate, "day")) return true;
+      return false;
+    }).length;
+
+    const responseRate = filteredByTimestamp.length
+      ? Math.trunc((contactedCount / filteredByTimestamp.length) * 100)
       : 0;
     const responseSpeedDays = (() => {
       let totalDays = 0;
       let validCount = 0;
-      filtered.forEach((lead) => {
+      filteredByTimestamp.forEach((lead) => {
         const contactDate = getContactDate(lead);
         if (!lead.timestamp || !contactDate) return;
         if (startDate && dayjs(contactDate).isBefore(startDate, "day")) return;
@@ -1023,24 +1111,48 @@ router.get("/stats", async (req, res) => {
       return Math.trunc(totalDays / validCount);
     })();
 
+    // Derive top destination (most demanded) from submitted leads in period
+    const topDest = (destinationGroups || []).reduce(
+      (best, item) => (item && item.value > (best?.value || 0) ? item : best),
+      null
+    );
+
+    const leadsOverTimeSeries = leadsOverTime(filteredByTimestamp, "timestamp", granularity);
+    const leadsOverTimeInterestedSeries = leadsOverTimeInterested(filteredByTimestamp, "timestamp", granularity);
+    const leadsOverTimeByDestinationSeries = leadsOverTimeByDestination(filteredByTimestamp, "timestamp", granularity);
+    const leadsOverTimeBySourceSeries = leadsOverTimeBySource(filteredByTimestamp, "timestamp", granularity);
+    const leadsOverTimeBySourceInterestedSeries = leadsOverTimeBySourceInterested(
+      filteredByTimestamp,
+      "timestamp",
+      granularity
+    );
+
+    const perfSeries = leadsOverTimePerformance(filteredByTimestamp, "timestamp", granularity, startDate, endDate);
+    const leadsOverTimeFollowUpSeries = leadsOverTimeFollowUp(leads, granularity);
+    const leadsOverTimeInterestedByContactSeries = leadsOverTimeInterested(leads, "lastStateUpdate", granularity);
+    const filteredByCounselor = filterLeads(leads, { counselor, destination });
+    const teamPerformanceSeriesData = buildTeamPerformanceSeries(filteredByCounselor, granularity, startDate, endDate);
+
     res.json({
       latestDate: latestDate.format("YYYY-MM-DD"),
       range: {
         startDate: (startDate || earliestDate).format("YYYY-MM-DD"),
         endDate: (endDate || latestDate).format("YYYY-MM-DD"),
       },
-         avgPerDay: (() => {
-           const effectiveStart = startDate || earliestDate;
-           const effectiveEnd = endDate || latestDate;
-           const days = effectiveEnd.diff(effectiveStart, "day") + 1;
-           if (!days || days <= 0) return 0;
-           return Number((filtered.length / days).toFixed(2));
-         })(),
+      avgPerDay: (() => {
+        const effectiveStart = startDate || earliestDate;
+        const effectiveEnd = endDate || latestDate;
+        const days = effectiveEnd.diff(effectiveStart, "day") + 1;
+        if (!days || days <= 0) return 0;
+        return Number((filteredByTimestamp.length / days).toFixed(2));
+      })(),
       totals,
       responseRate,
       responseSpeedDays,
-      comparison: calcPeriodComparison(leads, startDate, endDate, dateField),
-      topCountryGrowth: topCountryByGrowth(leads, startDate, endDate, dateField),
+      // Keep period comparison aligned with General KPIs (submitted leads by timestamp)
+      comparison: calcPeriodComparison(leads, startDate, endDate, "timestamp"),
+      // Expose the most demanded destination in the period
+      topCountryGrowth: topDest ? { name: topDest.name, current: topDest.value, previous: 0, pctChange: 0 } : null,
       lastMonth: calcLastMonthStats(leads),
       byStatus: statusGroups,
       byStage: stageGroups,
@@ -1049,36 +1161,27 @@ router.get("/stats", async (req, res) => {
       bySource: sourceGroups,
       byFinanceState: financeGroups,
       byEligibility: eligibilityGroups,
-      byCounselorDetails: buildDetails(filtered, "counselor", "Not assigned yet"),
-      byDestinationDetails: buildDetails(filtered, "destination", "Unknown"),
-      agentLeaderboard: buildAgentLeaderboard(leads, startDate, endDate, dateField),
+      byCounselorDetails: buildDetails(filteredByTimestamp, "counselor", "Not assigned yet"),
+      byDestinationDetails: buildDetails(filteredByTimestamp, "destination", "Unknown"),
+      agentLeaderboard: buildAgentLeaderboard(leads, startDate, endDate, "timestamp"),
       allAgents: uniqueAgents(leads),
       timeGranularity: granularity,
-      leadsOverTime: leadsOverTime(filtered, dateField, granularity),
-      leadsOverTimeInterested: leadsOverTimeInterested(filtered, dateField, granularity),
-      leadsOverTimeByDestination: leadsOverTimeByDestination(filtered, dateField, granularity),
-      leadsOverTimeBySource: leadsOverTimeBySource(filtered, dateField, granularity),
-      leadsOverTimeBySourceInterested: leadsOverTimeBySourceInterested(
-        filtered,
-        dateField,
-        granularity
-      ),
+      leadsOverTime: leadsOverTimeSeries,
+      leadsOverTimeInterested: leadsOverTimeInterestedSeries,
+      leadsOverTimeByDestination: leadsOverTimeByDestinationSeries,
+      leadsOverTimeBySource: leadsOverTimeBySourceSeries,
+      leadsOverTimeBySourceInterested: leadsOverTimeBySourceInterestedSeries,
       leadsOverTimeByCounselor: leadsOverTimeByCounselor(
         leads,
         granularity,
         startDate,
         endDate
       ),
-      leadsOverTimePerformance: leadsOverTimePerformance(
-        filtered,
-        dateField,
-        granularity,
-        startDate,
-        endDate
-      ),
-      overallPerformance: buildOverallPerformance(
-        leadsOverTimePerformance(filtered, dateField, granularity, startDate, endDate)
-      ),
+      leadsOverTimePerformance: perfSeries,
+      leadsOverTimeFollowUp: leadsOverTimeFollowUpSeries,
+      leadsOverTimeInterestedByContact: leadsOverTimeInterestedByContactSeries,
+      teamPerformanceSeries: teamPerformanceSeriesData,
+      overallPerformance: buildOverallPerformance(perfSeries),
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

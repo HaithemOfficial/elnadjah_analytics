@@ -102,6 +102,18 @@ const toLocalDateString = (date) =>
   new Date(date.getFullYear(), date.getMonth(), date.getDate())
     .toLocaleDateString("en-CA");
 
+// ISO date-only strings ("YYYY-MM-DD") are parsed as UTC by the Date constructor,
+// which shifts the date by the local timezone offset (e.g. UTC+1 → off by 1 day).
+// This parser treats the string as a local calendar date instead.
+const parseLocalDate = (str) => {
+  if (!str) return null;
+  const parts = str.split("-");
+  if (parts.length !== 3) return null;
+  const [y, m, d] = parts.map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+};
+
 const StatCard = ({ title, value, subtitle, helper, helperTone }) => (
   <div className="rounded-2xl bg-gradient-to-br from-slate-900/80 via-slate-900/60 to-slate-900/30 p-5 border border-slate-800 shadow-[0_20px_60px_-45px_rgba(15,23,42,0.8)] transition hover:border-slate-700">
     <p className="text-[13px] uppercase tracking-wide text-slate-400">{title}</p>
@@ -264,6 +276,20 @@ const getLeadDate = (lead, dateField) => {
   return lead.timestamp || lead.lastStateUpdate || null;
 };
 
+const resolveDateField = (filters) => {
+  const hasStart = Boolean(filters?.startDate) && !filters?.allTime;
+  const hasEnd = Boolean(filters?.endDate) && !filters?.allTime;
+  const field = filters?.dateField || "timestamp";
+
+  // For selected periods, default to Edited timestamp to keep all
+  // contacted-related metrics consistent across tabs.
+  if ((hasStart || hasEnd) && (field === "timestamp" || !field)) {
+    return "lastStateUpdate";
+  }
+
+  return field;
+};
+
 const getContactDate = (lead) => lead.lastStateUpdate || null;
 const hasAssignedAgent = (lead) => Boolean(String(lead?.counselor || "").trim());
 const hasContactedLead = (lead) => Boolean(getContactDate(lead));
@@ -274,19 +300,22 @@ function evaluateDestinationEligibility(lead) {
   const destination = normalizeText(lead?.destination);
   const bac = normalizeText(lead?.bac);
   const budget = normalizeText(lead?.budget);
+  const level = normalizeText(lead?.level);
 
   const isLithuania = destination.includes("ليتوانيا");
-  if (!isLithuania) {
-    return { applicable: false, eligible: null };
+  if (isLithuania) {
+    return { applicable: true, eligible: budget.includes("أكثر من 100 مليون") };
   }
 
-  const hasInvalidBac = bac.includes("بدون bac") || bac.includes("without bac");
-  const hasLowBudget = budget.includes("أقل من 100 مليون");
+  const isItaly = destination.includes("إيطاليا") || destination.includes("ايطاليا");
+  if (isItaly) {
+    const bacScore = parseFloat(bac);
+    const hasValidBac = !isNaN(bacScore) && bacScore >= 10;
+    const hasValidLevel = level.includes("b1") || level.includes("b2") || level.includes("c1") || level.includes("c2");
+    return { applicable: true, eligible: hasValidBac && hasValidLevel };
+  }
 
-  return {
-    applicable: true,
-    eligible: !(hasInvalidBac || hasLowBudget),
-  };
+  return { applicable: false, eligible: null };
 }
 
 function inRange(date, startDate, endDate) {
@@ -423,6 +452,14 @@ function buildOverallPerformance(series) {
     .filter(Boolean);
 }
 
+function formatResponseTime(days) {
+  if (!Number.isFinite(days) || days <= 0) return "-";
+  if (days >= 1) return `${days.toFixed(1)} d`;
+  const hours = days * 24;
+  if (hours >= 1) return `${Math.round(hours)} h`;
+  return `${Math.round(hours * 60)} min`;
+}
+
 function pctChange(current, previous) {
   if (!previous) return current ? 100 : 0;
   return Math.trunc(((current - previous) / previous) * 100);
@@ -432,6 +469,7 @@ function countStatusInRange(leads, startDate, endDate, dateField) {
   const filtered = leads.filter((lead) => inRange(getLeadDate(lead, dateField), startDate, endDate));
   const counts = {
     total: filtered.length,
+    contacted: 0,
     interested: 0,
     followUp: 0,
     needsMoreInfo: 0,
@@ -440,8 +478,13 @@ function countStatusInRange(leads, startDate, endDate, dateField) {
     notContacted: 0,
   };
   filtered.forEach((lead) => {
+    const contactedInPeriod = inRange(getContactDate(lead), startDate, endDate);
     const category = normalizeStatusCategory(lead.status);
-    if (!hasContactedLead(lead)) counts.notContacted += 1;
+    if (contactedInPeriod) {
+      counts.contacted += 1;
+    } else {
+      counts.notContacted += 1;
+    }
     if (category === "Interested / Will apply") counts.interested += 1;
     if (category === "Follow-Up / No Reply") counts.followUp += 1;
     if (category === "Needs More Info / Thinking") counts.needsMoreInfo += 1;
@@ -538,7 +581,7 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
     : null;
 
   const initRow = () => ({
-    contacted: 0,
+    contactedInPeriod: 0,  // leads worked on in period (by lastStateUpdate)
     interested: 0,
     responseCount: 0,
     responseDaysSum: 0,
@@ -553,23 +596,20 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
   leads.forEach((lead) => {
     if (!hasAssignedAgent(lead)) return;
     const contactDate = getContactDate(lead);
-    if (!contactDate) return;
     if (!inRange(contactDate, startDate, endDate)) return;
 
     if (!current.has(lead.counselor)) current.set(lead.counselor, initRow());
     const row = current.get(lead.counselor);
-    row.contacted += 1;
+
+    row.contactedInPeriod += 1;
     if (normalizeStatusCategory(lead.status) === "Interested / Will apply") row.interested += 1;
     const destination = lead.destination || "Unknown";
     row.destinationCounts[destination] = (row.destinationCounts[destination] || 0) + 1;
-
     if (lead.timestamp && contactDate) {
       const days = diffDaysInclusive(startOfDay(lead.timestamp), startOfDay(contactDate)) - 1;
       if (days >= 0) {
         row.responseCount += 1;
         row.responseDaysSum += days;
-      }
-      if (inRange(contactDate, startDate, endDate) && days >= 0) {
         row.followUpCount += 1;
         row.followUpDaysSum += days;
       }
@@ -580,12 +620,12 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
     leads.forEach((lead) => {
       if (!hasAssignedAgent(lead)) return;
       const contactDate = getContactDate(lead);
-      if (!contactDate) return;
       if (!inRange(contactDate, previousStart, previousEnd)) return;
 
       if (!previous.has(lead.counselor)) previous.set(lead.counselor, initRow());
       const row = previous.get(lead.counselor);
-      row.contacted += 1;
+
+      row.contactedInPeriod += 1;
       if (normalizeStatusCategory(lead.status) === "Interested / Will apply") row.interested += 1;
       if (lead.timestamp && contactDate) {
         const days = diffDaysInclusive(startOfDay(lead.timestamp), startOfDay(contactDate)) - 1;
@@ -608,19 +648,25 @@ function buildAgentLeaderboard(leads, startDate, endDate, dateField) {
       const topCountry = Object.entries(row.destinationCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "-";
       return {
         name,
-        contacted: row.contacted,
+        // Keep `contacted` aligned with worked-on leads in period (Edited timestamp)
+        // so table columns and cards show the same contacted metric.
+        contacted: row.contactedInPeriod,
+        contactedInPeriod: row.contactedInPeriod, // leads worked on in period
         interested: row.interested,
-        interestedRate: row.contacted ? Math.trunc((row.interested / row.contacted) * 100) : 0,
+        interestedRate: row.contactedInPeriod
+          ? Math.trunc((row.interested / row.contactedInPeriod) * 100)
+          : 0,
         topCountry,
         followUpSpeedDays: row.followUpCount ? Math.trunc(row.followUpDaysSum / row.followUpCount) : null,
-        avgContactedPerDay: lengthDays ? Number((row.contacted / lengthDays).toFixed(2)) : null,
+        avgContactedPerDay: lengthDays ? Number((row.contactedInPeriod / lengthDays).toFixed(2)) : null,
         avgResponseDays,
         responseChangePct,
-        contactedChangePct: prev ? pctChange(row.contacted, prev.contacted) : null,
+        contactedChangePct: prev ? pctChange(row.contactedInPeriod, prev.contactedInPeriod) : null,
         interestedChangePct: prev ? pctChange(row.interested, prev.interested) : null,
+        contactedInPeriodChangePct: prev ? pctChange(row.contactedInPeriod, prev.contactedInPeriod) : null,
       };
     })
-    .sort((a, b) => b.contacted - a.contacted);
+    .sort((a, b) => b.contactedInPeriod - a.contactedInPeriod || b.contacted - a.contacted);
 }
 
 function uniqueAgents(leads) {
@@ -632,9 +678,10 @@ function uniqueAgents(leads) {
 }
 
 function buildStatsFromLeads(leads, filters) {
-  const dateField = filters.dateField || "timestamp";
-  const startDate = filters.allTime || !filters.startDate ? null : startOfDay(new Date(filters.startDate));
-  const endDate = filters.allTime || !filters.endDate ? null : endOfDay(new Date(filters.endDate));
+  const dateField = resolveDateField(filters);
+
+  const startDate = filters.allTime || !filters.startDate ? null : startOfDay(parseLocalDate(filters.startDate));
+  const endDate = filters.allTime || !filters.endDate ? null : endOfDay(parseLocalDate(filters.endDate));
 
   const scopedLeads = leads.filter((lead) => {
     if (filters.counselor && lead.counselor !== filters.counselor) return false;
@@ -675,7 +722,7 @@ function buildStatsFromLeads(leads, filters) {
     return value.includes("not eligible");
   }).length;
 
-  const contactedCount = filtered.filter(hasContactedLead).length;
+  const contactedCount = totals.contacted;
   const responseRate = filtered.length ? Math.trunc((contactedCount / filtered.length) * 100) : 0;
 
   let speedTotal = 0;
@@ -697,6 +744,12 @@ function buildStatsFromLeads(leads, filters) {
     dateField,
     granularity,
     (lead) => normalizeStatusCategory(lead.status) === "Interested / Will apply"
+  );
+  const leadsOverTimeFollowUp = seriesByDate(
+    filtered,
+    dateField,
+    granularity,
+    (lead) => normalizeStatusCategory(lead.status) === "Follow-Up / No Reply"
   );
   const leadsOverTimePerformanceSeries = leadsOverTimePerformance(
     filtered,
@@ -736,6 +789,7 @@ function buildStatsFromLeads(leads, filters) {
     timeGranularity: granularity,
     leadsOverTime: leadsSeries,
     leadsOverTimeInterested,
+    leadsOverTimeFollowUp,
     leadsOverTimeByDestination: leadsOverTimeByDimension(filtered, dateField, granularity, "destination"),
     leadsOverTimeBySource: leadsOverTimeByDimension(filtered, dateField, granularity, "source"),
     leadsOverTimeBySourceInterested: leadsOverTimeByDimension(
@@ -758,6 +812,8 @@ function buildStatsFromLeads(leads, filters) {
 export default function App() {
   const [stats, setStats] = useState(null);
   const [allLeads, setAllLeads] = useState([]);
+  const [serverStats, setServerStats] = useState(null);
+  const [serverStatsLoading, setServerStatsLoading] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -780,6 +836,7 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
+  const [alertsCollapsed, setAlertsCollapsed] = useState(true);
 
   const storedFilters = (() => {
     try {
@@ -823,7 +880,7 @@ export default function App() {
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const activePage = "overview";
   const [activeOverviewGroup, setActiveOverviewGroup] = useState("general");
-  const [alertsPanelCollapsed, setAlertsPanelCollapsed] = useState(false);
+  const [alertsPanelCollapsed, setAlertsPanelCollapsed] = useState(true);
 
   const logout = async () => {
     try {
@@ -840,6 +897,7 @@ export default function App() {
     setAuthToken("");
     setAuthUser(null);
     setAllLeads([]);
+    setServerStats(null);
     setStats(null);
     setLoginPassword("");
     setLoginError("");
@@ -907,6 +965,7 @@ export default function App() {
     if (!authToken) {
       setLoading(false);
       setAllLeads([]);
+      setServerStats(null);
       return;
     }
 
@@ -944,8 +1003,70 @@ export default function App() {
   }, [refreshKey, authToken]);
 
   useEffect(() => {
+    if (!authToken) {
+      setServerStats(null);
+      setServerStatsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const fetchStats = async () => {
+      setServerStatsLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (filters.allTime) {
+          params.set("all", "true");
+        } else {
+          if (filters.startDate) params.set("startDate", filters.startDate);
+          if (filters.endDate) params.set("endDate", filters.endDate);
+        }
+        if (filters.counselor) params.set("counselor", filters.counselor);
+        if (filters.destination) params.set("destination", filters.destination);
+
+        // Keep backend default behavior for timestamp-vs-edited resolution.
+        if (filters.dateField && filters.dateField !== "timestamp") {
+          params.set("dateField", filters.dateField);
+        }
+
+        const query = params.toString();
+        const path = query ? `/api/stats?${query}` : "/api/stats";
+        const resp = await apiFetch(path, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!resp.ok) throw new Error("Failed to load server stats");
+        const payload = await resp.json();
+        if (!cancelled) setServerStats(payload);
+      } catch (err) {
+        if (!cancelled) {
+          // Fallback to client computation when stats endpoint is unavailable.
+          setServerStats(null);
+        }
+      } finally {
+        if (!cancelled) setServerStatsLoading(false);
+      }
+    };
+
+    fetchStats();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, refreshKey, filters]);
+
+  useEffect(() => {
+    // Prefer server-provided stats when available to ensure canonical numbers.
+    if (serverStats) {
+      setStats(serverStats);
+      return;
+    }
+
+    // Avoid rendering temporary local numbers while server stats are loading,
+    // which can cause a brief flash of incorrect values on refresh.
+    if (serverStatsLoading) return;
+
     setStats(buildStatsFromLeads(allLeads, filters));
-  }, [allLeads, filters]);
+  }, [allLeads, filters, serverStats, serverStatsLoading]);
 
   useEffect(() => {
     try {
@@ -1137,7 +1258,7 @@ export default function App() {
   const leaderboardRows = useMemo(() => {
     const rows = agentLeaderboard
       .filter((row) => row.name !== "Not assigned yet")
-      .sort((a, b) => b.contacted - a.contacted);
+      .sort((a, b) => b.contactedInPeriod - a.contactedInPeriod || b.contacted - a.contacted);
 
     return rows.map((row, index) => ({
       ...row,
@@ -1149,6 +1270,22 @@ export default function App() {
   const inactiveAgents = allAgents.filter(
     (name) => name && !activeAgentNames.includes(name)
   );
+
+  const allLeaderboardRows = [
+    ...leaderboardRows,
+    ...inactiveAgents.map((name, i) => ({
+      name,
+      rank: leaderboardRows.length + i + 1,
+      badge: "",
+      contactedInPeriod: 0,
+      contacted: 0,
+      interested: 0,
+      interestedRate: 0,
+      avgContactedPerDay: null,
+      avgResponseDays: null,
+      topCountry: "-",
+    })),
+  ];
 
   const totalLeads = stats?.totals?.total ?? 0;
   const pct = (value) =>
@@ -1218,8 +1355,8 @@ export default function App() {
     ? Math.max(
         1,
         Math.floor(
-          (endOfDay(new Date(stats.range.endDate)).getTime() -
-            startOfDay(new Date(stats.range.startDate)).getTime()) /
+          (endOfDay(parseLocalDate(stats.range.endDate)).getTime() -
+            startOfDay(parseLocalDate(stats.range.startDate)).getTime()) /
             86400000
         ) + 1
       )
@@ -1230,8 +1367,8 @@ export default function App() {
       return { contacted: 0, interested: 0, avgPerDay: 0 };
     }
 
-    const currentStart = startOfDay(new Date(stats.range.startDate));
-    const currentEnd = endOfDay(new Date(stats.range.endDate));
+    const currentStart = startOfDay(parseLocalDate(stats.range.startDate));
+    const currentEnd = endOfDay(parseLocalDate(stats.range.endDate));
     const days = diffDaysInclusive(currentStart, currentEnd);
     const previousEnd = endOfDay(new Date(currentStart.getTime() - 86400000));
     const previousStart = startOfDay(
@@ -1271,7 +1408,7 @@ export default function App() {
     : "";
   const teamActiveAgents = leaderboardRows.length;
   const totalTeamContacted = leaderboardRows.reduce(
-    (sum, row) => sum + (row.contacted || 0),
+    (sum, row) => sum + (row.contactedInPeriod || 0),
     0
   );
   const totalTeamInterested = leaderboardRows.reduce(
@@ -1304,12 +1441,13 @@ export default function App() {
   const avgTeamResponseDays = Number.isFinite(avgTeamResponseDaysRaw)
     ? avgTeamResponseDaysRaw.toFixed(1)
     : "0.0";
+  const avgTeamResponseDisplay = formatResponseTime(avgTeamResponseDaysRaw);
   const teamCapacityUtilization = totalLeads
     ? ((assignedCount / totalLeads) * 100).toFixed(1)
     : "0.0";
   const teamPerformanceData = leaderboardRows.slice(0, 8).map((row) => ({
     name: row.name,
-    contacted: row.contacted,
+    contacted: row.contactedInPeriod,
     interested: row.interested,
   }));
   const teamInterestedRateData = leaderboardRows.slice(0, 8).map((row) => ({
@@ -1352,21 +1490,20 @@ export default function App() {
     : "0.0";
   const topDestinationTrendKeys = topDestinationRows.slice(0, 4).map((row) => row.name);
   const destinationLeaderboardRows = useMemo(() => {
-    const dateField = filters.dateField || "timestamp";
     const startDate =
       filters.allTime || !filters.startDate
         ? null
-        : startOfDay(new Date(filters.startDate));
+        : startOfDay(parseLocalDate(filters.startDate));
     const endDate =
       filters.allTime || !filters.endDate
         ? null
-        : endOfDay(new Date(filters.endDate));
+        : endOfDay(parseLocalDate(filters.endDate));
 
     const rows = allLeads
       .filter((lead) => {
         if (filters.counselor && lead.counselor !== filters.counselor) return false;
         if (filters.destination && lead.destination !== filters.destination) return false;
-        return inRange(getLeadDate(lead, dateField), startDate, endDate);
+        return inRange(lead.timestamp, startDate, endDate);
       })
       .reduce((acc, lead) => {
         const destinationName = lead.destination || "Unknown";
@@ -1385,7 +1522,7 @@ export default function App() {
 
         acc[destinationName].total += 1;
         const contactDate = getContactDate(lead);
-        if (contactDate && inRange(contactDate, startDate, endDate)) {
+        if (contactDate) {
           acc[destinationName].contacted += 1;
         }
         if (normalizeStatusCategory(lead.status) === "Interested / Will apply") {
@@ -1417,6 +1554,64 @@ export default function App() {
       }))
       .sort((a, b) => b.total - a.total);
   }, [allLeads, filters]);
+
+  const topDestinationBreakdowns = useMemo(() => {
+    const top3 = destinationLeaderboardRows.slice(0, 3);
+    const granularity = stats?.timeGranularity || "month";
+    const startDate = filters.allTime || !filters.startDate ? null : startOfDay(parseLocalDate(filters.startDate));
+    const endDate = filters.allTime || !filters.endDate ? null : endOfDay(parseLocalDate(filters.endDate));
+
+    return top3.map((destRow) => {
+      const buckets = {};
+      allLeads
+        .filter((lead) => lead.destination === destRow.name && inRange(lead.timestamp, startDate, endDate))
+        .forEach((lead) => {
+          const d = lead.timestamp;
+          if (!d) return;
+          const key = granularity === "month"
+            ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
+            : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+          if (!buckets[key]) buckets[key] = { date: key, leads: 0, contacted: 0, eligible: 0, interested: 0 };
+          buckets[key].leads += 1;
+          if (getContactDate(lead)) buckets[key].contacted += 1;
+          const elig = evaluateDestinationEligibility(lead);
+          if (elig.applicable && elig.eligible) buckets[key].eligible += 1;
+          if (normalizeStatusCategory(lead.status) === "Interested / Will apply") buckets[key].interested += 1;
+        });
+      return {
+        name: destRow.name,
+        total: destRow.total,
+        eligible: destRow.eligible,
+        interested: destRow.interested,
+        eligibilityConfigured: destRow.eligibilityConfigured,
+        series: Object.values(buckets).sort((a, b) => a.date.localeCompare(b.date)),
+      };
+    });
+  }, [allLeads, destinationLeaderboardRows, filters, stats?.timeGranularity]);
+
+  const eligibleTrendSeries = useMemo(() => {
+    const granularity = stats?.timeGranularity || "month";
+    const startDate = filters.allTime || !filters.startDate ? null : startOfDay(parseLocalDate(filters.startDate));
+    const endDate = filters.allTime || !filters.endDate ? null : endOfDay(parseLocalDate(filters.endDate));
+    const buckets = {};
+    allLeads
+      .filter((lead) => inRange(lead.timestamp, startDate, endDate))
+      .forEach((lead) => {
+        const elig = evaluateDestinationEligibility(lead);
+        if (!elig.applicable || !elig.eligible) return;
+        const d = lead.timestamp;
+        if (!d) return;
+        const key = granularity === "month"
+          ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
+          : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        if (!buckets[key]) buckets[key] = { date: key, italy: 0, lithuania: 0 };
+        const dest = normalizeText(lead?.destination);
+        if (dest.includes("إيطاليا") || dest.includes("ايطاليا")) buckets[key].italy += 1;
+        if (dest.includes("ليتوانيا")) buckets[key].lithuania += 1;
+      });
+    return Object.values(buckets).sort((a, b) => a.date.localeCompare(b.date));
+  }, [allLeads, filters, stats?.timeGranularity]);
+
   const totalInterested = stats?.totals?.interested ?? 0;
   const totalFollowUp = stats?.totals?.followUp ?? 0;
   const totalNeedsMoreInfo = stats?.totals?.needsMoreInfo ?? 0;
@@ -1455,6 +1650,11 @@ export default function App() {
       };
     });
   }, [stats]);
+
+  const teamPerformanceTrendSeries = useMemo(() => {
+    return stats?.teamPerformanceSeries ?? [];
+  }, [stats]);
+
   const sourceVolumeRows = [...(stats?.bySource ?? [])].sort((a, b) => b.value - a.value);
   const topSourceRows = sourceVolumeRows.slice(0, 8);
   const leadGenTopSourceName = topSourceRows[0]?.name || "-";
@@ -1480,15 +1680,17 @@ export default function App() {
     const startDate =
       filters.allTime || !filters.startDate
         ? null
-        : startOfDay(new Date(filters.startDate));
+        : startOfDay(parseLocalDate(filters.startDate));
     const endDate =
       filters.allTime || !filters.endDate
         ? null
-        : endOfDay(new Date(filters.endDate));
+        : endOfDay(parseLocalDate(filters.endDate));
 
     return allLeads.filter((lead) => {
       if (filters.counselor && lead.counselor !== filters.counselor) return false;
       if (filters.destination && lead.destination !== filters.destination) return false;
+      // Manager scope: filter by when the agent actually talked to the lead (column V).
+      // inRange returns false when date is null, so uncontacted leads are excluded.
       return inRange(getContactDate(lead), startDate, endDate);
     });
   }, [allLeads, filters]);
@@ -1498,6 +1700,12 @@ export default function App() {
     const STALE_DAYS = 3;
     const now = Date.now();
     const rows = new Map();
+
+    // Date range for "untouched" check: leads submitted in this window but never touched.
+    const mStartDate =
+      filters.allTime || !filters.startDate ? null : startOfDay(parseLocalDate(filters.startDate));
+    const mEndDate =
+      filters.allTime || !filters.endDate ? null : endOfDay(parseLocalDate(filters.endDate));
 
     managerScopedLeads.forEach((lead) => {
       const agent = String(lead.counselor || "").trim();
@@ -1545,16 +1753,44 @@ export default function App() {
       }
     });
 
+    // Count leads assigned to each agent that arrived in the period but were never contacted.
+    // These are absent from managerScopedLeads (which requires lastStateUpdate to be set).
+    allLeads.forEach((lead) => {
+      const agent = String(lead.counselor || "").trim();
+      if (!agent) return;
+      if (filters.counselor && lead.counselor !== filters.counselor) return;
+      if (filters.destination && lead.destination !== filters.destination) return;
+      if (hasContactedLead(lead)) return;
+      if (!inRange(lead.timestamp, mStartDate, mEndDate)) return;
+
+      if (!rows.has(agent)) {
+        rows.set(agent, {
+          name: agent,
+          assigned: 0,
+          interested: 0,
+          notInterested: 0,
+          followUp: 0,
+          delayHoursSum: 0,
+          delayCount: 0,
+          withinSla: 0,
+          untouched: 0,
+          stalled: 0,
+        });
+      }
+      rows.get(agent).untouched += 1;
+    });
+
     return Array.from(rows.values())
       .map((row) => {
         const avgDelayHours = row.delayCount ? row.delayHoursSum / row.delayCount : 0;
         const slaRate = row.delayCount ? (row.withinSla / row.delayCount) * 100 : 0;
         const conversionRate = row.assigned ? (row.interested / row.assigned) * 100 : 0;
         const notInterestedRate = row.assigned ? (row.notInterested / row.assigned) * 100 : 0;
-        const untouchedRate = row.assigned ? (row.untouched / row.assigned) * 100 : 0;
+        const totalForRate = row.assigned + row.untouched;
+        const untouchedRate = totalForRate ? (row.untouched / totalForRate) * 100 : 0;
         const stalledRate = row.assigned ? (row.stalled / row.assigned) * 100 : 0;
         const riskScore = Math.round(
-          (100 - slaRate) * 0.45 + stalledRate * 0.35 + untouchedRate * 0.2 + avgDelayHours * 0.4
+          (100 - slaRate) * 0.45 + stalledRate * 0.35 + untouchedRate * 0.2 + Math.min(avgDelayHours, 168) * 0.4
         );
 
         return {
@@ -1566,10 +1802,17 @@ export default function App() {
           untouchedRate,
           stalledRate,
           riskScore,
+          // Alert metrics
+          interestedRate: row.assigned ? Math.round((row.interested / row.assigned) * 100) : 0,
+          alertCount: (
+            (row.untouched > 10 ? 1 : 0) +
+            (row.stalled > 5 ? 1 : 0) +
+            (notInterestedRate > 40 ? 1 : 0)
+          ),
         };
       })
       .sort((a, b) => b.assigned - a.assigned);
-  }, [managerScopedLeads]);
+  }, [managerScopedLeads, allLeads, filters]);
 
   const managerTotals = managerAgentRows.reduce(
     (acc, row) => {
@@ -1654,11 +1897,6 @@ export default function App() {
     return map;
   }, [allLeads]);
 
-  const agentStatsMap = useMemo(
-    () => new Map(managerAgentRows.map((r) => [r.name, r])),
-    [managerAgentRows]
-  );
-
   const teamPipelineData = managerAgentRows.slice(0, 8).map((row) => ({
     name: row.name,
     Interested: row.interested,
@@ -1682,31 +1920,6 @@ export default function App() {
       contacted: row.assigned,
       avgDelayHours: Number(row.avgDelayHours.toFixed(1)),
     }));
-
-  const managerTableRows = useMemo(() => {
-    const activeMap = new Map(managerAgentRows.map((row) => [row.name, row]));
-    return allAgents
-      .map((name) => {
-        const row = activeMap.get(name);
-        return {
-          name,
-          contacted: row ? row.assigned : 0,
-          interested: row ? row.interested : 0,
-          notInterested: row ? row.notInterested : 0,
-          notInterestedRate: row ? row.notInterestedRate : 0,
-          untouched: row ? row.untouched : 0,
-          stalled: row ? row.stalled : 0,
-          avgDelayHours: row ? row.avgDelayHours : 0,
-          interestedRate: row ? row.conversionRate : 0,
-          lastActivity: agentLastActivity.get(name) || null,
-          status: row && row.assigned > 0 ? "Active" : "Inactive",
-        };
-      })
-      .sort((a, b) => {
-        if (a.status !== b.status) return a.status === "Active" ? -1 : 1;
-        return b.contacted - a.contacted;
-      });
-  }, [allAgents, managerAgentRows, agentLastActivity]);
 
   const managerWeeklyAlerts = useMemo(() => {
     const now = new Date();
@@ -1913,7 +2126,6 @@ export default function App() {
           <div className="no-scrollbar flex w-full items-center gap-2 overflow-x-auto py-2 px-1 sm:px-2 md:flex-wrap md:overflow-visible">
             {[
               { key: "general", label: "General KPIs" },
-              { key: "team", label: "Team Performance KPIs" },
               { key: "destinations", label: "Destinations KPIs" },
               { key: "manager", label: "Manager dashboard" },
             ].map((group) => (
@@ -2317,7 +2529,7 @@ export default function App() {
           </div>
         )}
 
-        {loading ? (
+        {loading || serverStatsLoading || !stats ? (
           <div className="rounded-2xl bg-slate-900/70 p-10 text-center text-slate-400 shadow-sm border border-slate-900 flex flex-col items-center justify-center">
             <svg className="animate-spin h-8 w-8 mb-4 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -2331,6 +2543,50 @@ export default function App() {
           </div>
         ) : activePage === "overview" ? (
           <>
+            {!alertsCollapsed && (
+              <section className="mb-6 rounded-2xl bg-rose-950/30 p-5 border border-rose-900/50">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-base font-semibold text-rose-100">
+                    🚨 Red alerts this week — {managerAgentRows.filter(row => row.alertCount > 0).length} agents need attention
+                  </h3>
+                  <button
+                    onClick={() => setAlertsCollapsed(true)}
+                    className="text-rose-400 hover:text-rose-300 text-sm font-medium transition-colors"
+                  >
+                    Hide
+                  </button>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {managerAgentRows
+                    .filter(row => row.alertCount > 0)
+                    .map((agent) => (
+                      <div key={`alert-${agent.name}`} className="rounded-lg bg-rose-900/20 border border-rose-900/40 p-4">
+                        <h4 className="font-medium text-rose-300 mb-1">{agent.name}</h4>
+                        <p className="text-xs text-rose-400/70 mb-3">
+                          {toLocalDateString(new Date(stats?.range?.startDate))} → {toLocalDateString(new Date(stats?.range?.endDate))}
+                        </p>
+                        <ul className="space-y-1 text-xs text-rose-200">
+                          {agent.untouched > 10 && (
+                            <li>• Inactive for {agent.untouched} full days in a row</li>
+                          )}
+                          {agent.workingDaysLastWeek && agent.workingDaysLastWeek < 4 && (
+                            <li>• Worked only {agent.workingDaysLastWeek} days last week (minimum 4 required)</li>
+                          )}
+                          {agent.contactsLastWeek && agent.contactsLastWeek < 50 && (
+                            <li>• Contacted only {agent.contactsLastWeek} leads last week (minimum 50)</li>
+                          )}
+                          {agent.interestedRate && agent.interestedRate < 15 && (
+                            <li>• Very low interested rate: {agent.interestedRate}%</li>
+                          )}
+                        </ul>
+                      </div>
+                    ))}
+                </div>
+              </section>
+            )}
+
+            {/* Bottom compact alert banner removed per user request. Top card-only alerts kept. */}
+
             {activeOverviewGroup === "general" && (
               <section className="space-y-6">
                       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -2422,6 +2678,25 @@ export default function App() {
                       </ResponsiveContainer>
                     </ChartCard>
 
+                    <ChartCard title="Eligible leads trend — Italy & Lithuania">
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart data={eligibleTrendSeries} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                          <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 11 }} tickFormatter={(v) => formatDate(v, stats?.timeGranularity)} />
+                          <YAxis allowDecimals={false} stroke="#94a3b8" tick={{ fontSize: 11 }} width={28} />
+                          <Tooltip
+                            contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
+                            labelFormatter={(v) => formatDate(v, stats?.timeGranularity)}
+                          />
+                          <Legend />
+                          <Line type="monotone" dataKey="italy" name="Italy" stroke="#22C55E" strokeWidth={2} dot={false} />
+                          <Line type="monotone" dataKey="lithuania" name="Lithuania" stroke="#6366F1" strokeWidth={2} dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </ChartCard>
+                  </div>
+
+                  <div className="grid gap-6 lg:grid-cols-2">
                     <ChartCard title="Leads by stage">
                       <ResponsiveContainer>
                         <BarChart data={stats?.byStage ?? []}>
@@ -2453,12 +2728,13 @@ export default function App() {
                         </BarChart>
                       </ResponsiveContainer>
                     </ChartCard>
+                    <div></div>
                   </div>
 
                   <div className="flex flex-col gap-8">
                     <ChartCard title="Potential money trend">
                       <p className="-mt-3 mb-3 text-xs text-slate-400">
-                        Combines new leads and interested leads to show potential value.
+                        Combines contacted and interested leads to show potential value.
                       </p>
                       <div className="w-full max-w-full" style={{ height: 300 }}>
                         <ResponsiveContainer width="100%" height={300}>
@@ -2611,154 +2887,6 @@ export default function App() {
                     </ChartCard>
                   </div>
                 </div>
-              </section>
-            )}
-
-            {activeOverviewGroup === "team" && (
-              <section className="space-y-6">
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                  <StatCard
-                    title="Active agents"
-                    value={formatNumber(teamActiveAgents)}
-                    helper={`${formatNumber(inactiveAgents.length)} inactive in selected period`}
-                    helperTone={inactiveAgents.length > 0 ? "negative" : "positive"}
-                  />
-                  <StatCard
-                    title="Coverage rate"
-                    value={`${teamCapacityUtilization}%`}
-                    helper={`${formatNumber(assignedCount)} contacted of ${formatNumber(totalLeads)} leads`}
-                    helperTone={Number(teamCapacityUtilization) >= 85 ? "positive" : "negative"}
-                  />
-                  <StatCard
-                    title="Team interested rate"
-                    value={`${teamInterestedRate}%`}
-                    helper={`${formatNumber(totalTeamInterested)} interested from ${formatNumber(totalTeamContacted)} contacted`}
-                    helperTone={Number(teamInterestedRate) >= 20 ? "positive" : "negative"}
-                  />
-                  <StatCard
-                    title="Avg first response"
-                    value={`${avgTeamResponseDays} days`}
-                    helper={
-                      Number(avgTeamResponseDays) <= 2
-                        ? "Fast response benchmark"
-                        : "Opportunity to speed up first touch"
-                    }
-                    helperTone={Number(avgTeamResponseDays) <= 2 ? "positive" : "negative"}
-                  />
-                </div>
-
-                <div className="grid gap-4 md:grid-cols-3">
-                  <StatCard
-                    title="Untouched leads"
-                    value={formatNumber(managerTotalUntouched)}
-                    helper={`${managerTotals.assigned > 0 ? ((managerTotalUntouched / managerTotals.assigned) * 100).toFixed(1) : 0}% of assigned leads never contacted`}
-                    helperTone={managerTotalUntouched > 0 ? "negative" : "positive"}
-                  />
-                  <StatCard
-                    title="Stalled in follow-up"
-                    value={formatNumber(managerTotalStalled)}
-                    helper="Follow-up leads with no activity for 3+ days"
-                    helperTone={managerTotalStalled > 0 ? "negative" : "positive"}
-                  />
-                  <StatCard
-                    title="Not-interested rate"
-                    value={`${managerNotInterestedRate}%`}
-                    helper={`${formatNumber(managerTotals.notInterested)} leads rejected — quality signal`}
-                    helperTone={Number(managerNotInterestedRate) > 40 ? "negative" : Number(managerNotInterestedRate) > 25 ? null : "positive"}
-                  />
-                </div>
-
-                <ChartCard title="Pipeline breakdown by agent (top 8)">
-                  <ResponsiveContainer>
-                    <BarChart data={teamPipelineData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                      <XAxis dataKey="name" stroke="#94a3b8" />
-                      <YAxis allowDecimals={false} stroke="#94a3b8" />
-                      <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                      <Legend />
-                      <Bar dataKey="Interested" stackId="a" fill="#22C55E" radius={[0, 0, 0, 0]} />
-                      <Bar dataKey="Follow-up" stackId="a" fill="#F59E0B" radius={[0, 0, 0, 0]} />
-                      <Bar dataKey="Not interested" stackId="a" fill="#E11D48" radius={[0, 0, 0, 0]} />
-                      <Bar dataKey="Untouched" stackId="a" fill="#64748B" radius={[6, 6, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </ChartCard>
-
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <ChartCard title="Agent output and quality (top 8)">
-                    <ResponsiveContainer>
-                      <BarChart data={teamPerformanceData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis dataKey="name" stroke="#94a3b8" />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
-                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                        <Legend />
-                        <Bar dataKey="contacted" fill="#38BDF8" radius={[6, 6, 0, 0]} name="Contacted" />
-                        <Bar dataKey="interested" fill="#22C55E" radius={[6, 6, 0, 0]} name="Interested" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-
-                  <ChartCard title="Coverage mix">
-                    <ResponsiveContainer>
-                      <PieChart>
-                        <Tooltip
-                          contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
-                        />
-                        <Legend />
-                        <Pie
-                          data={teamCoverageData}
-                          dataKey="value"
-                          nameKey="name"
-                          innerRadius={55}
-                          outerRadius={90}
-                          paddingAngle={3}
-                        >
-                          {teamCoverageData.map((entry, index) => (
-                            <Cell
-                              key={`team-coverage-cell-${entry.name}`}
-                              fill={SOURCE_COLORS[index % SOURCE_COLORS.length]}
-                            />
-                          ))}
-                        </Pie>
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-                </div>
-
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <ChartCard title="Interested rate benchmark (top 8)">
-                    <ResponsiveContainer>
-                      <BarChart data={teamInterestedRateData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis dataKey="name" stroke="#94a3b8" />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
-                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                        <Legend />
-                        <ReferenceLine y={30} stroke="#94a3b8" strokeDasharray="4 4" label="Target 30%" />
-                        <Bar dataKey="interestedRate" fill="#F59E0B" radius={[6, 6, 0, 0]} name="Interested rate %" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-
-                  <ChartCard title="Avg contacted per day by agent (top 8)">
-                    <ResponsiveContainer>
-                      <BarChart data={teamAvgContactedPerDayData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis dataKey="name" stroke="#94a3b8" />
-                        <YAxis stroke="#94a3b8" />
-                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                        <Legend />
-                        <Bar
-                          dataKey="avgContactedPerDay"
-                          fill="#38BDF8"
-                          radius={[6, 6, 0, 0]}
-                          name="Avg contacted/day"
-                        />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-                </div>
 
                 <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
                   <h3 className="text-base font-semibold text-slate-100 mb-4">
@@ -2770,23 +2898,18 @@ export default function App() {
                         <tr className="text-left">
                           <th className="py-2 pr-4">Rank</th>
                           <th className="py-2 pr-4">Agent</th>
-                          <th className="py-2 pr-4">Contacted</th>
+                          <th className="py-2 pr-4 text-sky-400">Contacted</th>
                           <th className="py-2 pr-4">Interested</th>
-                          <th className="py-2 pr-4">Interested %</th>
-                          <th className="py-2 pr-4">Not interested %</th>
-                          <th className="py-2 pr-4">Untouched</th>
-                          <th className="py-2 pr-4">Stalled</th>
+                          <th className="py-2 pr-4">Interested rate</th>
                           <th className="py-2 pr-4">Avg/day</th>
                           <th className="py-2 pr-4">Avg response</th>
                           <th className="py-2 pr-4">Top destination</th>
                         </tr>
                       </thead>
                       <tbody className="text-slate-100">
-                        {leaderboardRows.slice(0, 12).map((row) => {
-                          const agentStats = agentStatsMap.get(row.name);
-                          return (
+                        {allLeaderboardRows.map((row) => (
                           <tr
-                            key={`team-leaderboard-${row.name}`}
+                            key={`general-leaderboard-${row.name}`}
                             className={`border-t border-slate-800 ${
                               row.rank === 1
                                 ? "bg-amber-400/10"
@@ -2801,28 +2924,14 @@ export default function App() {
                               {row.badge} {row.rank}
                             </td>
                             <td className="py-2 pr-4">{row.name}</td>
-                            <td className="py-2 pr-4">{formatNumber(row.contacted)}</td>
+                            <td className="py-2 pr-4 text-sky-400 font-medium">{formatNumber(row.contactedInPeriod)}</td>
                             <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
                             <td className="py-2 pr-4 text-emerald-400">{row.interestedRate}%</td>
-                            <td className={`py-2 pr-4 ${agentStats && agentStats.notInterestedRate > 40 ? "text-rose-400" : "text-slate-100"}`}>
-                              {agentStats ? `${agentStats.notInterestedRate.toFixed(1)}%` : "-"}
-                            </td>
-                            <td className={`py-2 pr-4 ${agentStats && agentStats.untouched > 0 ? "text-amber-400" : "text-slate-100"}`}>
-                              {agentStats ? formatNumber(agentStats.untouched) : "-"}
-                            </td>
-                            <td className={`py-2 pr-4 ${agentStats && agentStats.stalled > 0 ? "text-orange-400" : "text-slate-100"}`}>
-                              {agentStats ? formatNumber(agentStats.stalled) : "-"}
-                            </td>
                             <td className="py-2 pr-4">{row.avgContactedPerDay ?? "-"}</td>
-                            <td className="py-2 pr-4">
-                              {Number.isFinite(row.avgResponseDays)
-                                ? `${row.avgResponseDays}d`
-                                : "-"}
-                            </td>
+                            <td className="py-2 pr-4">{formatResponseTime(row.avgResponseDays)}</td>
                             <td className="py-2 pr-4">{row.topCountry || "-"}</td>
                           </tr>
-                          );
-                        })}
+                        ))}
                       </tbody>
                     </table>
                   </div>
@@ -2832,6 +2941,55 @@ export default function App() {
 
             {activeOverviewGroup === "manager" && (
               <section className="space-y-6">
+                <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
+                  <h3 className="text-base font-semibold text-slate-100 mb-4">
+                    Team leaderboard
+                  </h3>
+                  <div className="overflow-auto">
+                    <table className="min-w-full text-xs">
+                      <thead className="text-slate-400">
+                        <tr className="text-left">
+                          <th className="py-2 pr-4">Rank</th>
+                          <th className="py-2 pr-4">Agent</th>
+                          <th className="py-2 pr-4 text-sky-400">Contacted</th>
+                          <th className="py-2 pr-4">Interested</th>
+                          <th className="py-2 pr-4">Interested rate</th>
+                          <th className="py-2 pr-4">Avg/day</th>
+                          <th className="py-2 pr-4">Avg response</th>
+                          <th className="py-2 pr-4">Top destination</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-slate-100">
+                        {allLeaderboardRows.map((row) => (
+                          <tr
+                            key={`manager-leaderboard-${row.name}`}
+                            className={`border-t border-slate-800 ${
+                              row.rank === 1
+                                ? "bg-amber-400/10"
+                                : row.rank === 2
+                                ? "bg-slate-400/10"
+                                : row.rank === 3
+                                ? "bg-amber-700/10"
+                                : ""
+                            }`}
+                          >
+                            <td className="py-2 pr-4 font-medium">
+                              {row.badge} {row.rank}
+                            </td>
+                            <td className="py-2 pr-4">{row.name}</td>
+                            <td className="py-2 pr-4 text-sky-400 font-medium">{formatNumber(row.contactedInPeriod)}</td>
+                            <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
+                            <td className="py-2 pr-4 text-emerald-400">{row.interestedRate}%</td>
+                            <td className="py-2 pr-4">{row.avgContactedPerDay ?? "-"}</td>
+                            <td className="py-2 pr-4">{formatResponseTime(row.avgResponseDays)}</td>
+                            <td className="py-2 pr-4">{row.topCountry || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <StatCard
                     title="Active agents"
@@ -2865,6 +3023,73 @@ export default function App() {
                     helperTone={teamAvgContactedComparisonTone}
                   />
                 </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <StatCard
+                    title="Team interested rate"
+                    value={`${teamInterestedRate}%`}
+                    helper={`${formatNumber(totalTeamInterested)} interested from ${formatNumber(totalTeamContacted)} contacted`}
+                    helperTone={Number(teamInterestedRate) >= 20 ? "positive" : "negative"}
+                  />
+                  <StatCard
+                    title="Avg first response"
+                    value={avgTeamResponseDisplay}
+                    helper={
+                      Number(avgTeamResponseDays) <= 2
+                        ? "Fast response benchmark"
+                        : "Opportunity to speed up first touch"
+                    }
+                    helperTone={Number(avgTeamResponseDays) <= 2 ? "positive" : "negative"}
+                  />
+                </div>
+
+                <ChartCard title="Team performance over time">
+                  <p className="-mt-3 mb-3 text-xs text-slate-400">
+                    Contacts, interested and follow-up leads per period.
+                  </p>
+                  <div style={{ height: 300 }}>
+                    <ResponsiveContainer width="100%" height={300}>
+                      <LineChart data={teamPerformanceTrendSeries} margin={{ top: 20, right: 40, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis
+                          dataKey="date"
+                          tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                          stroke="#94a3b8"
+                        />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" />
+                        <Tooltip
+                          labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                          contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
+                        />
+                        <Legend />
+                        <Line
+                          type="monotone"
+                          dataKey="contacted"
+                          name="Contacted"
+                          stroke="#22C55E"
+                          strokeWidth={3}
+                          dot={false}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="interested"
+                          name="Interested"
+                          stroke="#F59E0B"
+                          strokeWidth={3}
+                          dot={false}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="followUp"
+                          name="Follow-up"
+                          stroke="#38BDF8"
+                          strokeWidth={3}
+                          dot={false}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </ChartCard>
 
                 <div className="grid gap-6 lg:grid-cols-2">
                   <ChartCard title="Agent output and quality (top 8)">
@@ -2940,58 +3165,22 @@ export default function App() {
                   </ChartCard>
                 </div>
 
-                <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
-                  <h3 className="text-base font-semibold text-slate-100 mb-4">
-                    Team leaderboard
-                  </h3>
-                  <div className="overflow-auto">
-                    <table className="min-w-full text-xs">
-                      <thead className="text-slate-400">
-                        <tr className="text-left">
-                          <th className="py-2 pr-4">Rank</th>
-                          <th className="py-2 pr-4">Agent</th>
-                          <th className="py-2 pr-4">Contacted</th>
-                          <th className="py-2 pr-4">Interested</th>
-                          <th className="py-2 pr-4">Interested rate</th>
-                          <th className="py-2 pr-4">Avg/day</th>
-                          <th className="py-2 pr-4">Avg response</th>
-                          <th className="py-2 pr-4">Top destination</th>
-                        </tr>
-                      </thead>
-                      <tbody className="text-slate-100">
-                        {leaderboardRows.slice(0, 12).map((row) => (
-                          <tr
-                            key={`manager-leaderboard-${row.name}`}
-                            className={`border-t border-slate-800 ${
-                              row.rank === 1
-                                ? "bg-amber-400/10"
-                                : row.rank === 2
-                                ? "bg-slate-400/10"
-                                : row.rank === 3
-                                ? "bg-amber-700/10"
-                                : ""
-                            }`}
-                          >
-                            <td className="py-2 pr-4 font-medium">
-                              {row.badge} {row.rank}
-                            </td>
-                            <td className="py-2 pr-4">{row.name}</td>
-                            <td className="py-2 pr-4">{formatNumber(row.contacted)}</td>
-                            <td className="py-2 pr-4">{formatNumber(row.interested)}</td>
-                            <td className="py-2 pr-4 text-emerald-400">{row.interestedRate}%</td>
-                            <td className="py-2 pr-4">{row.avgContactedPerDay ?? "-"}</td>
-                            <td className="py-2 pr-4">
-                              {Number.isFinite(row.avgResponseDays)
-                                ? `${row.avgResponseDays}d`
-                                : "-"}
-                            </td>
-                            <td className="py-2 pr-4">{row.topCountry || "-"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
+                <ChartCard title="Pipeline breakdown by agent (top 8)">
+                  <ResponsiveContainer>
+                    <BarChart data={teamPipelineData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                      <XAxis dataKey="name" stroke="#94a3b8" />
+                      <YAxis allowDecimals={false} stroke="#94a3b8" />
+                      <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                      <Legend />
+                      <Bar dataKey="Interested" stackId="a" fill="#22C55E" radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="Follow-up" stackId="a" fill="#F59E0B" radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="Not interested" stackId="a" fill="#E11D48" radius={[0, 0, 0, 0]} />
+                      <Bar dataKey="Untouched" stackId="a" fill="#64748B" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+
               </section>
             )}
 
@@ -3070,18 +3259,6 @@ export default function App() {
                 </div>
 
                 <div className="grid gap-6 lg:grid-cols-2">
-                  <ChartCard title="Destination volume ranking (top 8)">
-                    <ResponsiveContainer>
-                      <BarChart data={topDestinationRows}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis dataKey="name" stroke="#94a3b8" />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
-                        <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                        <Bar dataKey="value" fill="#F59E0B" radius={[6, 6, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-
                   <ChartCard title="Top destination momentum over time">
                     <ResponsiveContainer>
                       <LineChart data={stats?.leadsOverTimeByDestination ?? []}>
@@ -3110,7 +3287,84 @@ export default function App() {
                       </LineChart>
                     </ResponsiveContainer>
                   </ChartCard>
+
+                  <ChartCard title="Eligible leads trend — Italy & Lithuania">
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={eligibleTrendSeries} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                        <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 11 }} tickFormatter={(v) => formatDate(v, stats?.timeGranularity)} />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" tick={{ fontSize: 11 }} width={28} />
+                        <Tooltip
+                          contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
+                          labelFormatter={(v) => formatDate(v, stats?.timeGranularity)}
+                        />
+                        <Legend />
+                        <Line type="monotone" dataKey="italy" name="Italy" stroke="#22C55E" strokeWidth={2} dot={false} />
+                        <Line type="monotone" dataKey="lithuania" name="Lithuania" stroke="#6366F1" strokeWidth={2} dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
                 </div>
+
+                <ChartCard title="Destination volume ranking (top 8)">
+                  <ResponsiveContainer>
+                    <BarChart data={topDestinationRows}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                      <XAxis dataKey="name" stroke="#94a3b8" />
+                      <YAxis allowDecimals={false} stroke="#94a3b8" />
+                      <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                      <Bar dataKey="value" fill="#F59E0B" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+
+                {topDestinationBreakdowns.length > 0 && (
+                  <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
+                    <h3 className="text-base font-semibold text-slate-100 mb-4">Top destinations breakdown</h3>
+                    <div className="grid gap-6 lg:grid-cols-3">
+                      {topDestinationBreakdowns.map((dest) => (
+                      <ChartCard key={dest.name} title={dest.name}>
+                        <div className="flex gap-4 mb-3 text-xs text-slate-400 flex-wrap">
+                          <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: "#6366F1" }} />Leads</span>
+                          <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: "#0EA5E9" }} />Contacted</span>
+                          {dest.eligibilityConfigured && (
+                            <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: "#22C55E" }} />Eligible</span>
+                          )}
+                          <span><span className="inline-block w-2 h-2 rounded-full mr-1" style={{ background: "#F59E0B" }} />Interested</span>
+                        </div>
+                        {dest.series.length > 0 ? (
+                          <ResponsiveContainer width="100%" height={180}>
+                            <LineChart data={dest.series} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                              <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} tickFormatter={(v) => formatDate(v, stats?.timeGranularity)} />
+                              <YAxis allowDecimals={false} stroke="#94a3b8" tick={{ fontSize: 10 }} width={28} />
+                              <Tooltip
+                                contentStyle={{ background: "#0f172a", border: "1px solid #1f2937", fontSize: 11 }}
+                                labelFormatter={(v) => formatDate(v, stats?.timeGranularity)}
+                              />
+                              <Line type="monotone" dataKey="leads" name="Leads" stroke="#6366F1" strokeWidth={2} dot={false} />
+                              <Line type="monotone" dataKey="contacted" name="Contacted" stroke="#0EA5E9" strokeWidth={2} dot={false} />
+                              {dest.eligibilityConfigured && (
+                                <Line type="monotone" dataKey="eligible" name="Eligible" stroke="#22C55E" strokeWidth={2} dot={false} />
+                              )}
+                              <Line type="monotone" dataKey="interested" name="Interested" stroke="#F59E0B" strokeWidth={2} dot={false} />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="flex items-center justify-center h-[180px] text-slate-500 text-xs">No data for period</div>
+                        )}
+                        <div className="flex gap-4 mt-3 text-xs text-slate-400 border-t border-slate-800 pt-3">
+                          <span className="text-slate-100 font-medium">{dest.total}</span> leads
+                          {dest.eligibilityConfigured && (
+                            <><span className="text-green-400 font-medium">{dest.eligible}</span> eligible</>
+                          )}
+                          <span className="text-amber-400 font-medium">{dest.interested}</span> interested
+                        </div>
+                      </ChartCard>
+                    ))}
+                    </div>
+                  </section>
+                )}
 
                 <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
                   <h3 className="text-base font-semibold text-slate-100 mb-4">
@@ -3126,7 +3380,6 @@ export default function App() {
                           <th className="py-2 pr-4">Interested</th>
                           <th className="py-2 pr-4">Not contacted</th>
                           <th className="py-2 pr-4">Eligible</th>
-                          <th className="py-2 pr-4">Not eligible</th>
                           <th className="py-2 pr-4">Eligibility rate</th>
                         </tr>
                       </thead>
@@ -3143,9 +3396,6 @@ export default function App() {
                             <td className="py-2 pr-4">{formatNumber(row.notContacted)}</td>
                             <td className="py-2 pr-4">
                               {row.eligibilityConfigured ? formatNumber(row.eligible) : "-"}
-                            </td>
-                            <td className="py-2 pr-4">
-                              {row.eligibilityConfigured ? formatNumber(row.notEligible) : "-"}
                             </td>
                             <td className="py-2 pr-4">
                               {row.eligibilityConfigured && row.eligibilityRate !== null
