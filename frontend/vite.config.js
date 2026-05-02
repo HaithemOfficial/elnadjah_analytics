@@ -8,7 +8,7 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       devOptions: {
-        enabled: true,
+        enabled: false,
       },
       manifest: {
         name: "Lead Analyzer Dashboard",
@@ -42,6 +42,7 @@ export default defineConfig({
         ],
       },
       workbox: {
+        importScripts: ["/push-handler.js"],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\/.*/i,
@@ -75,4 +76,5 @@ export default defineConfig({
       "/api": "http://localhost:4000",
     },
   },
+  cacheDir: "node_modules/.vite-cache",
 });

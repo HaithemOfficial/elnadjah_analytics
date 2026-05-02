@@ -5,6 +5,12 @@ const {
   runAgentAlertsEmail,
   runWeeklyManagerPack,
 } = require("../notifications/dailySummary");
+const {
+  getVapidPublicKey,
+  saveSubscription,
+  removeSubscription,
+  checkLeadThresholdAndNotify,
+} = require("../notifications/push");
 
 const router = express.Router();
 
@@ -66,6 +72,59 @@ router.post("/weekly-manager-pack/send", async (req, res) => {
     res.json({
       ok: true,
       message: "Weekly manager pack sent.",
+      result,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+router.get("/push/public-key", (_req, res) => {
+  const publicKey = getVapidPublicKey();
+  res.json({
+    ok: true,
+    enabled: Boolean(publicKey),
+    publicKey,
+    threshold: Number(process.env.LEAD_THRESHOLD_PUSH_LIMIT || 100),
+  });
+});
+
+router.post("/push/subscribe", (req, res) => {
+  try {
+    const result = saveSubscription(req.body?.subscription || req.body, req.auth?.user);
+    res.json({
+      ok: true,
+      message: "Push subscription saved.",
+      result,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+router.post("/push/unsubscribe", (req, res) => {
+  const result = removeSubscription(req.body?.endpoint || "");
+  res.json({
+    ok: true,
+    message: "Push subscription removed.",
+    result,
+  });
+});
+
+router.post("/lead-threshold/check", async (req, res) => {
+  try {
+    const targetDate = req.body?.date || req.query?.date || null;
+    const dryRun =
+      req.body?.dryRun === true || String(req.query?.dryRun || "").toLowerCase() === "true";
+    const result = await checkLeadThresholdAndNotify("manual", targetDate, { dryRun });
+    res.json({
+      ok: true,
       result,
     });
   } catch (error) {

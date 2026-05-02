@@ -19,6 +19,10 @@ yarn-debug.log*
 yarn-error.log*
 *.log
 
+# Runtime data
+backend/data/push-subscriptions.json
+backend/data/push-state.json
+
 # OS/editor
 .DS_Store
 Thumbs.db

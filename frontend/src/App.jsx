@@ -66,6 +66,25 @@ const apiFetch = async (path, options) => {
 const AUTH_TOKEN_KEY = "leadAnalyzerAuthToken";
 const AUTH_USER_KEY = "leadAnalyzerAuthUser";
 
+const urlBase64ToUint8Array = (base64String) => {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = `${base64String}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; i += 1) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+
+  return outputArray;
+};
+
+const supportsPushNotifications = () =>
+  typeof window !== "undefined" &&
+  "Notification" in window &&
+  "serviceWorker" in navigator &&
+  "PushManager" in window;
+
 const formatDate = (value, granularity = "month") => {
   if (!value) return "";
   const asDate = value.length === 7 ? new Date(`${value}-01`) : new Date(value);
@@ -838,6 +857,10 @@ export default function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [alertsCollapsed, setAlertsCollapsed] = useState(true);
   const [selectedAgentForChart, setSelectedAgentForChart] = useState(null);
+  const [pushStatus, setPushStatus] = useState("idle");
+  const [pushMessage, setPushMessage] = useState("");
+  const [pushLoading, setPushLoading] = useState(false);
+  const [leadPushThreshold, setLeadPushThreshold] = useState(100);
 
   const storedFilters = (() => {
     try {
@@ -879,7 +902,7 @@ export default function App() {
   const [quickRange, setQuickRange] = useState(storedQuickRange);
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [showMobileFilters, setShowMobileFilters] = useState(false);
-  const activePage = "overview";
+  const [activePage, setActivePage] = useState("overview");
   const [activeOverviewGroup, setActiveOverviewGroup] = useState("general");
   const [alertsPanelCollapsed, setAlertsPanelCollapsed] = useState(true);
 
@@ -902,6 +925,8 @@ export default function App() {
     setStats(null);
     setLoginPassword("");
     setLoginError("");
+    setPushStatus("idle");
+    setPushMessage("");
     try {
       localStorage.removeItem(AUTH_TOKEN_KEY);
       localStorage.removeItem(AUTH_USER_KEY);
@@ -1002,6 +1027,148 @@ export default function App() {
     fetchLeads();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey, authToken]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setPushStatus("idle");
+      setPushMessage("");
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPushStatus = async () => {
+      if (!supportsPushNotifications()) {
+        if (!cancelled) {
+          setPushStatus("unsupported");
+          setPushMessage("Push not supported on this browser.");
+        }
+        return;
+      }
+
+      try {
+        const response = await apiFetch("/api/notifications/push/public-key", {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        const payload = await response.json().catch(() => ({}));
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.getSubscription();
+
+        if (!cancelled) {
+          setLeadPushThreshold(payload?.threshold || 100);
+          setPushStatus(subscription ? "enabled" : "disabled");
+          setPushMessage(
+            subscription
+              ? `Lead alert enabled above ${payload?.threshold || 100}/day.`
+              : `Lead alert off above ${payload?.threshold || 100}/day.`
+          );
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPushStatus("disabled");
+          setPushMessage("Lead alert unavailable.");
+        }
+      }
+    };
+
+    loadPushStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken]);
+
+  const enableLeadPushAlerts = async () => {
+    setPushLoading(true);
+    setPushMessage("");
+
+    try {
+      if (!supportsPushNotifications()) {
+        throw new Error("Push not supported on this browser.");
+      }
+      if (!window.isSecureContext) {
+        throw new Error("Push requires HTTPS on phones.");
+      }
+
+      const keyResponse = await apiFetch("/api/notifications/push/public-key", {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const keyPayload = await keyResponse.json().catch(() => ({}));
+      if (!keyResponse.ok || !keyPayload?.publicKey) {
+        throw new Error(keyPayload?.error || "Push keys are not configured.");
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        throw new Error("Notification permission was not granted.");
+      }
+
+      const registration = await navigator.serviceWorker.ready;
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(keyPayload.publicKey),
+        });
+      }
+
+      const saveResponse = await apiFetch("/api/notifications/push/subscribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ subscription: subscription.toJSON() }),
+      });
+      const savePayload = await saveResponse.json().catch(() => ({}));
+      if (!saveResponse.ok) {
+        throw new Error(savePayload?.error || "Failed to save phone subscription.");
+      }
+
+      setLeadPushThreshold(keyPayload.threshold || 100);
+      setPushStatus("enabled");
+      setPushMessage(`Lead alert enabled above ${keyPayload.threshold || 100}/day.`);
+    } catch (error) {
+      setPushStatus("disabled");
+      setPushMessage(error.message || "Failed to enable lead alert.");
+    } finally {
+      setPushLoading(false);
+    }
+  };
+
+  const disableLeadPushAlerts = async () => {
+    setPushLoading(true);
+    setPushMessage("");
+
+    try {
+      const registration = supportsPushNotifications()
+        ? await navigator.serviceWorker.ready
+        : null;
+      const subscription = registration
+        ? await registration.pushManager.getSubscription()
+        : null;
+
+      await apiFetch("/api/notifications/push/unsubscribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ endpoint: subscription?.endpoint || "" }),
+      });
+
+      if (subscription) {
+        await subscription.unsubscribe();
+      }
+
+      setPushStatus("disabled");
+      setPushMessage(`Lead alert off above ${leadPushThreshold}/day.`);
+    } catch (error) {
+      setPushMessage(error.message || "Failed to disable lead alert.");
+    } finally {
+      setPushLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!authToken) {
@@ -2138,8 +2305,19 @@ export default function App() {
             <p className="text-xs uppercase tracking-[0.3em] text-indigo-300/70">
               ElNadjah Intelligence
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <span className="text-xs text-slate-400">{authUser?.email || "Authenticated"}</span>
+              <button
+                type="button"
+                onClick={() => setActivePage((page) => (page === "settings" ? "overview" : "settings"))}
+                className={`rounded-md border px-3 py-1.5 text-xs ${
+                  activePage === "settings"
+                    ? "border-indigo-500 bg-indigo-500/20 text-indigo-100"
+                    : "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+                }`}
+              >
+                {activePage === "settings" ? "Dashboard" : "Settings"}
+              </button>
               <button
                 type="button"
                 onClick={logout}
@@ -2150,15 +2328,82 @@ export default function App() {
             </div>
           </div>
           <h1 className="text-2xl font-semibold text-slate-50">
-            ElNadjah Dashboard
+            {activePage === "settings" ? "Settings" : "ElNadjah Dashboard"}
           </h1>
           <p className="text-sm text-slate-400">
-            Google Form responses analytics in real time.
+            {activePage === "settings"
+              ? "Manage dashboard preferences and phone alerts."
+              : "Google Form responses analytics in real time."}
           </p>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+        {activePage === "settings" ? (
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5 shadow-[0_20px_60px_-45px_rgba(15,23,42,0.8)]">
+            <div className="flex flex-col gap-2 border-b border-slate-800 pb-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-50">Notification settings</h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  Phone alerts for operational thresholds.
+                </p>
+              </div>
+              <span
+                className={`inline-flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs ${
+                  pushStatus === "enabled"
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+                    : pushStatus === "unsupported"
+                    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                    : "border-slate-700 bg-slate-950 text-slate-300"
+                }`}
+              >
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    pushStatus === "enabled"
+                      ? "bg-emerald-400"
+                      : pushStatus === "unsupported"
+                      ? "bg-amber-400"
+                      : "bg-slate-500"
+                  }`}
+                />
+                {pushStatus === "enabled"
+                  ? "Enabled"
+                  : pushStatus === "unsupported"
+                  ? "Unsupported"
+                  : "Disabled"}
+              </span>
+            </div>
+
+            <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-100">
+                    100 leads per day phone alert
+                  </h3>
+                  <p className="mt-1 max-w-2xl text-sm text-slate-400">
+                    Send a push notification to this device when today&apos;s total leads pass {leadPushThreshold}.
+                  </p>
+                  {pushMessage && (
+                    <p className="mt-2 text-xs text-slate-500">{pushMessage}</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={pushStatus === "enabled" ? disableLeadPushAlerts : enableLeadPushAlerts}
+                  disabled={pushLoading || pushStatus === "unsupported"}
+                  className={`min-w-[120px] rounded-lg border px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                    pushStatus === "enabled"
+                      ? "border-rose-500/50 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20"
+                      : "border-emerald-500/50 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20"
+                  }`}
+                >
+                  {pushLoading ? "Saving..." : pushStatus === "enabled" ? "Turn off" : "Turn on"}
+                </button>
+              </div>
+            </div>
+          </section>
+        ) : (
+          <>
         {managerWeeklyAlerts.length > 0 && (
           <div className="rounded-2xl border border-rose-700/60 bg-rose-950/30 p-4">
             <div className="flex items-center justify-between gap-3">
@@ -3707,6 +3952,8 @@ export default function App() {
                 </table>
               </div>
             </section>
+          </>
+        )}
           </>
         )}
       </main>

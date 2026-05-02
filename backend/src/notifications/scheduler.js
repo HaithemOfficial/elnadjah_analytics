@@ -5,10 +5,12 @@ const {
   runAgentAlertsEmail,
   runWeeklyManagerPack,
 } = require("./dailySummary");
+const { checkLeadThresholdAndNotify } = require("./push");
 
 let dailyTask = null;
 let weeklyTask = null;
 let alertsTask = null;
+let leadThresholdTask = null;
 
 function startNotificationScheduler() {
   const dailyEnabled =
@@ -74,6 +76,42 @@ function startNotificationScheduler() {
     }
   }
 
+  const leadThresholdEnabled =
+    String(process.env.LEAD_THRESHOLD_PUSH_ENABLED || "false").toLowerCase() === "true";
+  if (leadThresholdEnabled) {
+    const thresholdCronExpr = process.env.LEAD_THRESHOLD_PUSH_CRON || "*/15 * * * *";
+    const thresholdTimezone =
+      process.env.LEAD_THRESHOLD_PUSH_TIMEZONE ||
+      process.env.DAILY_SUMMARY_TIMEZONE ||
+      "UTC";
+
+    if (!cron.validate(thresholdCronExpr)) {
+      console.error(`[notifications] Invalid LEAD_THRESHOLD_PUSH_CRON expression: ${thresholdCronExpr}`);
+    } else {
+      leadThresholdTask = cron.schedule(
+        thresholdCronExpr,
+        async () => {
+          try {
+            const result = await checkLeadThresholdAndNotify("scheduler");
+            const deliveryText = result.delivery
+              ? `${result.delivery.sent} push notifications sent`
+              : "no push sent";
+            console.log(
+              `[notifications] Lead threshold check: ${result.summary.total}/${result.threshold} leads for ${result.summary.date}; ${deliveryText}`
+            );
+          } catch (error) {
+            console.error(`[notifications] Lead threshold push failed: ${error.message}`);
+          }
+        },
+        { timezone: thresholdTimezone }
+      );
+
+      console.log(
+        `[notifications] Lead threshold push scheduler enabled: '${thresholdCronExpr}' (${thresholdTimezone})`
+      );
+    }
+  }
+
   if (weeklyEnabled) {
     const weeklyCronExpr = process.env.WEEKLY_SUMMARY_CRON || "0 11 * * 5";
     const weeklyTimezone =
@@ -103,11 +141,11 @@ function startNotificationScheduler() {
     }
   }
 
-  if (!dailyEnabled && !weeklyEnabled && !alertsEnabled) {
+  if (!dailyEnabled && !weeklyEnabled && !alertsEnabled && !leadThresholdEnabled) {
     return null;
   }
 
-  return { dailyTask, weeklyTask, alertsTask };
+  return { dailyTask, weeklyTask, alertsTask, leadThresholdTask };
 }
 
 module.exports = {

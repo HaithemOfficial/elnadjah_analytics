@@ -872,5 +872,7 @@ module.exports = {
   runWeeklySummaryEmail,
   runAgentAlertsEmail,
   runWeeklyManagerPack,
+  buildDailySummary,
   buildWeeklyAgentMetrics,
+  rowsToMinimalLeads,
 };
