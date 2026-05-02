@@ -1318,19 +1318,7 @@ export default function App() {
   const eligibilityRate = totalLeads ? ((eligibleCount / totalLeads) * 100).toFixed(1) : "0.0";
 
   const potentialSeries = useMemo(() => {
-    const leadsSeries = stats?.leadsOverTime ?? [];
-    const interestedSeries = stats?.leadsOverTimeInterested ?? [];
-    if (!leadsSeries.length) return [];
-    const interestedMap = new Map(interestedSeries.map((row) => [row.date, row.count]));
-    return leadsSeries.map((row) => {
-      const interestedCount = interestedMap.get(row.date) || 0;
-      return {
-        date: row.date,
-        leads: row.count || 0,
-        interested: interestedCount,
-        potential: (row.count || 0) + interestedCount,
-      };
-    });
+    return stats?.leadsOverTimeInterested ?? [];
   }, [stats]);
   const notContactedCount = stats?.totals?.notContacted ?? 0;
   const assignedCount = Math.max(totalLeads - notContactedCount, 0);
@@ -1969,10 +1957,10 @@ export default function App() {
         ).size;
         const inactiveDaysInWeek = Math.max(7 - activeDaysInWeek, 0);
 
-        // Rolling consecutive inactive days (looking back from yesterday, max 21)
+        // Rolling consecutive inactive days (looking back from yesterday, max 7)
         let consecutiveInactive = 0;
         const cursor = new Date(yesterday);
-        for (let i = 0; i < 21; i += 1) {
+        for (let i = 0; i < 7; i += 1) {
           const key = toLocalDateString(cursor);
           if (allActivityDays.has(key)) break;
           consecutiveInactive += 1;
@@ -1980,11 +1968,11 @@ export default function App() {
         }
 
         const reasons = [];
-        if (consecutiveInactive >= 2) {
+        if (consecutiveInactive >= 3) {
           reasons.push(`Inactive for ${consecutiveInactive} full days in a row`);
         }
-        if (inactiveDaysInWeek >= 3) {
-          reasons.push(`Worked only ${activeDaysInWeek} day${activeDaysInWeek !== 1 ? "s" : ""} last week (minimum 4 required)`);
+        if (inactiveDaysInWeek >= 5) {
+          reasons.push(`Worked only ${activeDaysInWeek} day${activeDaysInWeek !== 1 ? "s" : ""} last week (minimum 5 required)`);
         }
         if (contactedWeek < 50) {
           reasons.push(`Contacted only ${contactedWeek} leads last week (minimum 50)`);
@@ -2127,7 +2115,7 @@ export default function App() {
             {[
               { key: "general", label: "General KPIs" },
               { key: "destinations", label: "Destinations KPIs" },
-              { key: "manager", label: "Manager dashboard" },
+              { key: "manager", label: "Team KPIs" },
             ].map((group) => (
               <button
                 key={group.key}
@@ -2679,14 +2667,18 @@ export default function App() {
                     </ChartCard>
 
                     <ChartCard title="Eligible leads trend — Italy & Lithuania">
-                      <ResponsiveContainer width="100%" height={220}>
-                        <LineChart data={eligibleTrendSeries} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
+                      <ResponsiveContainer>
+                        <LineChart data={eligibleTrendSeries} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                          <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 11 }} tickFormatter={(v) => formatDate(v, stats?.timeGranularity)} />
-                          <YAxis allowDecimals={false} stroke="#94a3b8" tick={{ fontSize: 11 }} width={28} />
+                          <XAxis
+                            dataKey="date"
+                            tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                            stroke="#94a3b8"
+                          />
+                          <YAxis allowDecimals={false} stroke="#94a3b8" />
                           <Tooltip
                             contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
-                            labelFormatter={(v) => formatDate(v, stats?.timeGranularity)}
+                            labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
                           />
                           <Legend />
                           <Line type="monotone" dataKey="italy" name="Italy" stroke="#22C55E" strokeWidth={2} dot={false} />
@@ -2728,42 +2720,6 @@ export default function App() {
                         </BarChart>
                       </ResponsiveContainer>
                     </ChartCard>
-                    <div></div>
-                  </div>
-
-                  <div className="flex flex-col gap-8">
-                    <ChartCard title="Potential money trend">
-                      <p className="-mt-3 mb-3 text-xs text-slate-400">
-                        Combines contacted and interested leads to show potential value.
-                      </p>
-                      <div className="w-full max-w-full" style={{ height: 300 }}>
-                        <ResponsiveContainer width="100%" height={300}>
-                          <LineChart data={potentialSeries} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                            <XAxis
-                              dataKey="date"
-                              tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
-                              stroke="#94a3b8"
-                            />
-                            <YAxis allowDecimals={false} stroke="#94a3b8" />
-                            <Tooltip
-                              labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
-                              contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
-                            />
-                            <Legend />
-                            <Line
-                              type="monotone"
-                              dataKey="potential"
-                              name="Potential score"
-                              stroke="#F59E0B"
-                              strokeWidth={3}
-                              dot={false}
-                            />
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </ChartCard>
-
                     <ChartCard title="Demand vs Contacted (performance)">
                       <div className="w-full max-w-full" style={{ height: 300 }}>
                         <ResponsiveContainer width="100%" height={300}>
@@ -2793,6 +2749,40 @@ export default function App() {
                               dataKey="contacted"
                               name="Contacted"
                               stroke="#22C55E"
+                              strokeWidth={3}
+                              dot={false}
+                            />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </ChartCard>
+                  </div>
+
+                  <div className="flex flex-col gap-8">
+                    <ChartCard title="Interested leads trend">
+                      <p className="-mt-3 mb-3 text-xs text-slate-400">
+                        Tracks interested leads across all destinations in the selected period.
+                      </p>
+                      <div className="w-full max-w-full" style={{ height: 300 }}>
+                        <ResponsiveContainer width="100%" height={300}>
+                          <LineChart data={potentialSeries} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                            <XAxis
+                              dataKey="date"
+                              tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                              stroke="#94a3b8"
+                            />
+                            <YAxis allowDecimals={false} stroke="#94a3b8" />
+                            <Tooltip
+                              labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                              contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
+                            />
+                            <Legend />
+                            <Line
+                              type="monotone"
+                              dataKey="count"
+                              name="Interested"
+                              stroke="#F59E0B"
                               strokeWidth={3}
                               dot={false}
                             />
@@ -3225,39 +3215,6 @@ export default function App() {
                   />
                 </div>
 
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  <MiniStat
-                    title="Avg leads per destination"
-                    value={avgLeadsPerDestination}
-                    subtitle={`${formatNumber(totalLeads)} leads across ${formatNumber(activeDestinationCount)} destinations`}
-                  />
-                  <MiniStat
-                    title="Coverage depth"
-                    value={`${destinationCoverageRate}%`}
-                    subtitle="Share of destinations with 10+ leads"
-                  />
-                  <MiniStat
-                    title="Growth market share"
-                    value={topCountryGrowth?.name || "-"}
-                    subtitle={
-                      topCountryGrowth
-                        ? `${formatNumber(topCountryGrowth.current)} current-period leads`
-                        : "No dominant growth market"
-                    }
-                  />
-                  <MiniStat
-                    title="Concentration signal"
-                    value={
-                      Number(top3DestinationShare) >= 70
-                        ? "High"
-                        : Number(top3DestinationShare) >= 50
-                        ? "Medium"
-                        : "Low"
-                    }
-                    subtitle="Risk of over-dependence on few markets"
-                  />
-                </div>
-
                 <div className="grid gap-6 lg:grid-cols-2">
                   <ChartCard title="Top destination momentum over time">
                     <ResponsiveContainer>
@@ -3289,14 +3246,18 @@ export default function App() {
                   </ChartCard>
 
                   <ChartCard title="Eligible leads trend — Italy & Lithuania">
-                    <ResponsiveContainer width="100%" height={220}>
-                      <LineChart data={eligibleTrendSeries} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
+                    <ResponsiveContainer>
+                      <LineChart data={eligibleTrendSeries} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                        <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 11 }} tickFormatter={(v) => formatDate(v, stats?.timeGranularity)} />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" tick={{ fontSize: 11 }} width={28} />
+                        <XAxis
+                          dataKey="date"
+                          tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
+                          stroke="#94a3b8"
+                        />
+                        <YAxis allowDecimals={false} stroke="#94a3b8" />
                         <Tooltip
                           contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
-                          labelFormatter={(v) => formatDate(v, stats?.timeGranularity)}
+                          labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
                         />
                         <Legend />
                         <Line type="monotone" dataKey="italy" name="Italy" stroke="#22C55E" strokeWidth={2} dot={false} />
@@ -3305,18 +3266,6 @@ export default function App() {
                     </ResponsiveContainer>
                   </ChartCard>
                 </div>
-
-                <ChartCard title="Destination volume ranking (top 8)">
-                  <ResponsiveContainer>
-                    <BarChart data={topDestinationRows}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                      <XAxis dataKey="name" stroke="#94a3b8" />
-                      <YAxis allowDecimals={false} stroke="#94a3b8" />
-                      <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
-                      <Bar dataKey="value" fill="#F59E0B" radius={[6, 6, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </ChartCard>
 
                 {topDestinationBreakdowns.length > 0 && (
                   <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
@@ -3365,6 +3314,18 @@ export default function App() {
                     </div>
                   </section>
                 )}
+
+                <ChartCard title="Destination volume ranking (top 8)">
+                  <ResponsiveContainer>
+                    <BarChart data={topDestinationRows}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                      <XAxis dataKey="name" stroke="#94a3b8" />
+                      <YAxis allowDecimals={false} stroke="#94a3b8" />
+                      <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }} />
+                      <Bar dataKey="value" fill="#F59E0B" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </ChartCard>
 
                 <section className="rounded-2xl bg-slate-900/70 p-5 border border-slate-800">
                   <h3 className="text-base font-semibold text-slate-100 mb-4">
