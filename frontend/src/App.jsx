@@ -1747,6 +1747,29 @@ export default function App() {
     return agentContactedTrendSeries;
   }, [agentContactedTrendSeries, selectedAgentForChart]);
 
+  const agentChartYAxisTicks = useMemo(() => {
+    if (!filteredAgentContactedData.length) return [0, 8, 16, 24];
+
+    let maxValue = 0;
+    filteredAgentContactedData.forEach((item) => {
+      Object.entries(item).forEach(([key, value]) => {
+        if (key !== "date" && typeof value === "number" && value > maxValue) {
+          maxValue = value;
+        }
+      });
+    });
+
+    // Round up to nearest multiple of 8
+    const roundedMax = Math.ceil(maxValue / 8) * 8;
+
+    // Generate ticks at intervals of 8
+    const ticks = [];
+    for (let i = 0; i <= roundedMax; i += 8) {
+      ticks.push(i);
+    }
+    return ticks;
+  }, [filteredAgentContactedData]);
+
   const managerAgentRows = useMemo(() => {
     const SLA_HOURS = 24;
     const STALE_DAYS = 3;
@@ -3174,7 +3197,13 @@ export default function App() {
                           tickFormatter={(value) => formatDate(value, stats?.timeGranularity)}
                           stroke="#94a3b8"
                         />
-                        <YAxis allowDecimals={false} stroke="#94a3b8" />
+                        <YAxis 
+                          allowDecimals={false} 
+                          stroke="#94a3b8" 
+                          type="number"
+                          domain={[0, "dataMax"]}
+                          ticks={agentChartYAxisTicks}
+                        />
                         <Tooltip
                           labelFormatter={(value) => formatDate(value, stats?.timeGranularity)}
                           contentStyle={{ background: "#0f172a", border: "1px solid #1f2937" }}
