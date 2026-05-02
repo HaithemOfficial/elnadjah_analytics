@@ -1643,6 +1643,46 @@ export default function App() {
     return stats?.teamPerformanceSeries ?? [];
   }, [stats]);
 
+  const sourceVolumeRows = [...(stats?.bySource ?? [])].sort((a, b) => b.value - a.value);
+  const topSourceRows = sourceVolumeRows.slice(0, 8);
+  const leadGenTopSourceName = topSourceRows[0]?.name || "-";
+  const leadGenTopSourceCount = topSourceRows[0]?.value ?? 0;
+  const activeSourceCount = sourceVolumeRows.length;
+  const topSourceShare = totalLeads
+    ? ((leadGenTopSourceCount / totalLeads) * 100).toFixed(1)
+    : "0.0";
+  const top3SourceShare = totalLeads
+    ? ((topSourceRows.slice(0, 3).reduce((sum, row) => sum + row.value, 0) / totalLeads) * 100).toFixed(1)
+    : "0.0";
+  const avgLeadsPerSource = activeSourceCount
+    ? (totalLeads / activeSourceCount).toFixed(1)
+    : "0.0";
+  const sourceCoverageCount = sourceVolumeRows.filter((row) => row.value >= 10).length;
+  const sourceCoverageRate = activeSourceCount
+    ? ((sourceCoverageCount / activeSourceCount) * 100).toFixed(1)
+    : "0.0";
+  const leadGenGrowthCurrent = Number(stats?.comparison?.totals?.pctChange ?? 0);
+  const topSourceTrendKeys = topSourceRows.slice(0, 4).map((row) => row.name);
+
+  const managerScopedLeads = useMemo(() => {
+    const startDate =
+      filters.allTime || !filters.startDate
+        ? null
+        : startOfDay(parseLocalDate(filters.startDate));
+    const endDate =
+      filters.allTime || !filters.endDate
+        ? null
+        : endOfDay(parseLocalDate(filters.endDate));
+
+    return allLeads.filter((lead) => {
+      if (filters.counselor && lead.counselor !== filters.counselor) return false;
+      if (filters.destination && lead.destination !== filters.destination) return false;
+      // Manager scope: filter by when the agent actually talked to the lead (column V).
+      // inRange returns false when date is null, so uncontacted leads are excluded.
+      return inRange(getContactDate(lead), startDate, endDate);
+    });
+  }, [allLeads, filters]);
+
   const agentContactedTrendSeries = useMemo(() => {
     if (!managerScopedLeads || !managerScopedLeads.length) return [];
     
@@ -1692,46 +1732,6 @@ export default function App() {
         return obj;
       });
   }, [managerScopedLeads]);
-
-  const sourceVolumeRows = [...(stats?.bySource ?? [])].sort((a, b) => b.value - a.value);
-  const topSourceRows = sourceVolumeRows.slice(0, 8);
-  const leadGenTopSourceName = topSourceRows[0]?.name || "-";
-  const leadGenTopSourceCount = topSourceRows[0]?.value ?? 0;
-  const activeSourceCount = sourceVolumeRows.length;
-  const topSourceShare = totalLeads
-    ? ((leadGenTopSourceCount / totalLeads) * 100).toFixed(1)
-    : "0.0";
-  const top3SourceShare = totalLeads
-    ? ((topSourceRows.slice(0, 3).reduce((sum, row) => sum + row.value, 0) / totalLeads) * 100).toFixed(1)
-    : "0.0";
-  const avgLeadsPerSource = activeSourceCount
-    ? (totalLeads / activeSourceCount).toFixed(1)
-    : "0.0";
-  const sourceCoverageCount = sourceVolumeRows.filter((row) => row.value >= 10).length;
-  const sourceCoverageRate = activeSourceCount
-    ? ((sourceCoverageCount / activeSourceCount) * 100).toFixed(1)
-    : "0.0";
-  const leadGenGrowthCurrent = Number(stats?.comparison?.totals?.pctChange ?? 0);
-  const topSourceTrendKeys = topSourceRows.slice(0, 4).map((row) => row.name);
-
-  const managerScopedLeads = useMemo(() => {
-    const startDate =
-      filters.allTime || !filters.startDate
-        ? null
-        : startOfDay(parseLocalDate(filters.startDate));
-    const endDate =
-      filters.allTime || !filters.endDate
-        ? null
-        : endOfDay(parseLocalDate(filters.endDate));
-
-    return allLeads.filter((lead) => {
-      if (filters.counselor && lead.counselor !== filters.counselor) return false;
-      if (filters.destination && lead.destination !== filters.destination) return false;
-      // Manager scope: filter by when the agent actually talked to the lead (column V).
-      // inRange returns false when date is null, so uncontacted leads are excluded.
-      return inRange(getContactDate(lead), startDate, endDate);
-    });
-  }, [allLeads, filters]);
 
   const managerAgentRows = useMemo(() => {
     const SLA_HOURS = 24;
