@@ -65,6 +65,10 @@ const apiFetch = async (path, options) => {
 };
 const AUTH_TOKEN_KEY = "leadAnalyzerAuthToken";
 const AUTH_USER_KEY = "leadAnalyzerAuthUser";
+const CUSTOM_PUSH_ALLOWED_EMAILS = new Set([
+  "loukrichi.mohamedfouad@gmail.com",
+  "haithemofficial@gmail.com",
+]);
 
 const urlBase64ToUint8Array = (base64String) => {
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -861,6 +865,9 @@ export default function App() {
   const [pushMessage, setPushMessage] = useState("");
   const [pushLoading, setPushLoading] = useState(false);
   const [leadPushThreshold, setLeadPushThreshold] = useState(100);
+  const [customPushText, setCustomPushText] = useState("");
+  const [customPushMessage, setCustomPushMessage] = useState("");
+  const [customPushLoading, setCustomPushLoading] = useState(false);
 
   const storedFilters = (() => {
     try {
@@ -905,6 +912,9 @@ export default function App() {
   const [activePage, setActivePage] = useState("overview");
   const [activeOverviewGroup, setActiveOverviewGroup] = useState("general");
   const [alertsPanelCollapsed, setAlertsPanelCollapsed] = useState(true);
+  const canSendCustomPush = CUSTOM_PUSH_ALLOWED_EMAILS.has(
+    String(authUser?.email || "").trim().toLowerCase()
+  );
 
   const logout = async () => {
     try {
@@ -927,6 +937,8 @@ export default function App() {
     setLoginError("");
     setPushStatus("idle");
     setPushMessage("");
+    setCustomPushText("");
+    setCustomPushMessage("");
     try {
       localStorage.removeItem(AUTH_TOKEN_KEY);
       localStorage.removeItem(AUTH_USER_KEY);
@@ -1167,6 +1179,43 @@ export default function App() {
       setPushMessage(error.message || "Failed to disable lead alert.");
     } finally {
       setPushLoading(false);
+    }
+  };
+
+  const sendCustomPush = async (event) => {
+    event.preventDefault();
+    const text = customPushText.trim();
+    setCustomPushMessage("");
+
+    if (!text) {
+      setCustomPushMessage("Enter notification text first.");
+      return;
+    }
+
+    setCustomPushLoading(true);
+
+    try {
+      const response = await apiFetch("/api/notifications/push/custom", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({ text }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to send custom notification.");
+      }
+
+      setCustomPushText("");
+      setCustomPushMessage(
+        `Sent to ${payload?.result?.sent || 0} device${payload?.result?.sent === 1 ? "" : "s"}.`
+      );
+    } catch (error) {
+      setCustomPushMessage(error.message || "Failed to send custom notification.");
+    } finally {
+      setCustomPushLoading(false);
     }
   };
 
@@ -2401,6 +2450,45 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {canSendCustomPush && (
+              <form
+                className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-4"
+                onSubmit={sendCustomPush}
+              >
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-100">
+                      Push a custom notification
+                    </h3>
+                    <p className="mt-1 max-w-2xl text-sm text-slate-400">
+                      Send one message to every device that enabled push notifications.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
+                    <textarea
+                      value={customPushText}
+                      onChange={(event) => setCustomPushText(event.target.value.slice(0, 240))}
+                      rows={3}
+                      maxLength={240}
+                      className="min-h-[92px] flex-1 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-indigo-500"
+                      placeholder="Write the notification text..."
+                    />
+                    <button
+                      type="submit"
+                      disabled={customPushLoading || !customPushText.trim()}
+                      className="min-w-[120px] rounded-lg border border-indigo-500/50 bg-indigo-500/10 px-4 py-2 text-sm font-semibold text-indigo-100 transition hover:bg-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {customPushLoading ? "Pushing..." : "Push"}
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+                    <span>{customPushMessage}</span>
+                    <span>{customPushText.length}/240</span>
+                  </div>
+                </div>
+              </form>
+            )}
           </section>
         ) : (
           <>

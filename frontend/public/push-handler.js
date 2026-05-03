@@ -16,6 +16,12 @@ self.addEventListener("push", (event) => {
     icon: "/pwa-192x192.png",
     badge: "/favicon-32x32.png",
     tag: payload.tag || "elnadjah-alert",
+    actions: [
+      {
+        action: "mark-seen",
+        title: "Mark as seen",
+      },
+    ],
     data: {
       url: payload.url || "/",
       ...(payload.data || {}),
@@ -27,6 +33,10 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  if (event.action === "mark-seen") {
+    return;
+  }
+
   const targetUrl = new URL(event.notification.data?.url || "/", self.location.origin).href;
 
   event.waitUntil(
